@@ -77,69 +77,155 @@ def _parse_dt(s: Any) -> datetime:
     return datetime.utcnow()
 
 
+def _symbol_sina(stock_code: str) -> str:
+    code = (stock_code or "").strip()
+    if code.startswith(("5", "6", "9")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _parse_eastmoney_klines(payload: dict, stock_code: str) -> list[dict]:
+    data = payload.get("data") or {}
+    klines = data.get("klines") or []
+    points = []
+    for row in klines:
+        parts = str(row).split(",")
+        if len(parts) < 6:
+            continue
+        points.append({
+            "date": parts[0],
+            "open": float(parts[1]),
+            "close": float(parts[2]),
+            "high": float(parts[3]),
+            "low": float(parts[4]),
+            "volume": float(parts[5]),
+            "amount": float(parts[6]) if len(parts) > 6 else None,
+        })
+    return points, data.get("name") or "", data.get("code") or stock_code
+
+
+def _fetch_kline_tencent(stock_code: str, limit: int) -> dict:
+    """Fallback: Tencent fq kline."""
+    sym = _symbol_sina(stock_code)
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {"param": f"{sym},day,,,{max(5, min(limit, 320))},qfq"}
+    resp = SESSION.get(url, params=params, timeout=20, headers={"Referer": "https://gu.qq.com/"})
+    resp.raise_for_status()
+    payload = resp.json()
+    data = (payload.get("data") or {}).get(sym) or {}
+    rows = data.get("qfqday") or data.get("day") or []
+    name = ""
+    # qt may include name elsewhere
+    points = []
+    for row in rows:
+        # [date, open, close, high, low, volume]
+        if len(row) < 5:
+            continue
+        points.append({
+            "date": row[0],
+            "open": float(row[1]),
+            "close": float(row[2]),
+            "high": float(row[3]),
+            "low": float(row[4]),
+            "volume": float(row[5]) if len(row) > 5 else 0.0,
+            "amount": None,
+        })
+    if not points:
+        raise RuntimeError("tencent kline empty")
+    return {
+        "status": "ok",
+        "source": "tencent_kline",
+        "source_url": url,
+        "stock_code": stock_code,
+        "stock_name": name,
+        "total": len(points),
+        "data": points,
+    }
+
+
+def _fetch_kline_sina(stock_code: str, limit: int) -> dict:
+    """Fallback: Sina CN_MarketData.getKLineData"""
+    sym = _symbol_sina(stock_code)
+    url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+    params = {"symbol": sym, "scale": 240, "ma": "no", "datalen": max(5, min(limit, 250))}
+    resp = SESSION.get(url, params=params, timeout=20, headers={"Referer": "https://finance.sina.com.cn/"})
+    resp.raise_for_status()
+    rows = resp.json()
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("sina kline empty")
+    points = []
+    for row in rows:
+        points.append({
+            "date": row.get("day"),
+            "open": float(row.get("open")),
+            "close": float(row.get("close")),
+            "high": float(row.get("high")),
+            "low": float(row.get("low")),
+            "volume": float(row.get("volume") or 0),
+            "amount": None,
+        })
+    return {
+        "status": "ok",
+        "source": "sina_kline",
+        "source_url": url,
+        "stock_code": stock_code,
+        "stock_name": "",
+        "total": len(points),
+        "data": points,
+    }
+
+
 def fetch_kline(stock_code: str, limit: int = 120) -> dict:
     """
-    Real daily K-line for dashboard curves.
-    Source: East Money push2his kline API.
+    Real daily K-line for dashboard candlesticks.
+    Primary: East Money; fallbacks: Tencent / Sina.
     """
-    secid = to_secid(stock_code)
-    if not secid:
-        return {"status": "error", "message": "缺少股票代码", "source_url": SOURCE_URLS["kline_curve"]}
+    code = (stock_code or "").strip()
+    if not code:
+        return {"status": "error", "message": "缺少股票代码", "source_url": SOURCE_URLS["kline_curve"], "data": []}
+    secid = to_secid(code)
     params = {
         "secid": secid,
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": 101,  # daily
-        "fqt": 1,    # qfq
+        "klt": 101,
+        "fqt": 1,
         "end": "20500101",
         "lmt": max(5, min(int(limit), 500)),
     }
     last_err = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             resp = SESSION.get(
                 SOURCE_URLS["kline_curve"],
                 params=params,
-                timeout=25,
-                headers={
-                    "Referer": "https://quote.eastmoney.com/",
-                    "Host": "push2his.eastmoney.com",
-                },
+                timeout=20,
+                headers={"Referer": "https://quote.eastmoney.com/"},
             )
             resp.raise_for_status()
-            payload = resp.json()
-            data = payload.get("data") or {}
-            klines = data.get("klines") or []
-            points = []
-            for row in klines:
-                # date,open,close,high,low,volume,amount,...
-                parts = str(row).split(",")
-                if len(parts) < 6:
-                    continue
-                points.append({
-                    "date": parts[0],
-                    "open": float(parts[1]),
-                    "close": float(parts[2]),
-                    "high": float(parts[3]),
-                    "low": float(parts[4]),
-                    "volume": float(parts[5]),
-                    "amount": float(parts[6]) if len(parts) > 6 else None,
-                })
-            if not points:
-                last_err = "empty klines"
-                continue
-            return {
-                "status": "ok",
-                "source": "eastmoney_kline",
-                "source_url": SOURCE_URLS["kline_curve"],
-                "stock_code": data.get("code") or stock_code,
-                "stock_name": data.get("name") or "",
-                "total": len(points),
-                "data": points,
-            }
+            points, name, scode = _parse_eastmoney_klines(resp.json(), code)
+            if points:
+                return {
+                    "status": "ok",
+                    "source": "eastmoney_kline",
+                    "source_url": SOURCE_URLS["kline_curve"],
+                    "stock_code": scode,
+                    "stock_name": name,
+                    "total": len(points),
+                    "data": points,
+                }
+            last_err = "empty eastmoney klines"
         except Exception as e:
             last_err = str(e)
-            logger.warning("kline fetch attempt %s failed: %s", attempt + 1, e)
+            logger.warning("eastmoney kline attempt %s: %s", attempt + 1, e)
+
+    for fn in (_fetch_kline_tencent, _fetch_kline_sina):
+        try:
+            return fn(code, limit)
+        except Exception as e:
+            last_err = str(e)
+            logger.warning("kline fallback %s failed: %s", fn.__name__, e)
+
     return {
         "status": "error",
         "message": last_err or "kline fetch failed",
