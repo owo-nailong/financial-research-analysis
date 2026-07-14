@@ -1,5 +1,12 @@
 <template>
   <div class="kb-page">
+    <div class="page-intro">
+      <p>
+        知识库文档用于 RAG 检索增强问答。关闭开关后文档不再参与检索，删除为永久归档。
+        <strong>仅管理员可操作。</strong>
+      </p>
+    </div>
+
     <div class="toolbar">
       <input v-model="searchQuery" class="search" placeholder="搜索知识库..." @keydown.enter="load" />
       <select v-model="filterType" @change="load">
@@ -9,9 +16,13 @@
         <option value="公告">公告</option>
         <option value="自定义">自定义</option>
       </select>
+      <label class="check-label">
+        <input type="checkbox" v-model="includeDisabled" @change="load" />
+        显示已停用
+      </label>
       <button type="button" class="btn" @click="load">搜索</button>
-      <button v-if="isAdmin" type="button" class="btn primary" @click="showAdd = true">添加文档</button>
-      <button v-if="isAdmin" type="button" class="btn primary" @click="showImport = true">批量导入</button>
+      <button type="button" class="btn primary" @click="showAdd = true">添加文档</button>
+      <button type="button" class="btn primary" @click="showImport = true">批量导入</button>
       <span class="count">共 {{ total }} 篇</span>
     </div>
 
@@ -23,9 +34,10 @@
             <th>标题</th>
             <th>类型</th>
             <th>来源 URL</th>
-            <th>文件路径</th>
+            <th>状态</th>
+            <th>启用（参与 RAG）</th>
             <th>创建时间</th>
-            <th v-if="isAdmin">操作</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -34,14 +46,29 @@
             <td class="title">{{ row.title }}</td>
             <td>{{ row.doc_type }}</td>
             <td class="mono">{{ row.source_url || '-' }}</td>
-            <td class="mono">{{ shortPath(row.file_path) }}</td>
+            <td>
+              <span class="status-pill" :class="row.enabled ? 'on' : 'off'">
+                {{ row.enabled ? '启用中' : '已停用' }}
+              </span>
+            </td>
+            <td @click.stop>
+              <label class="switch" :title="row.enabled ? '点击停用' : '点击启用'">
+                <input
+                  type="checkbox"
+                  :checked="row.enabled"
+                  :disabled="togglingId === row.id"
+                  @change="toggle(row, $event)"
+                />
+                <span class="slider" />
+              </label>
+            </td>
             <td>{{ formatDate(row.created_at) }}</td>
-            <td v-if="isAdmin" @click.stop>
-              <button type="button" class="link" @click="remove(row)">删除</button>
+            <td @click.stop>
+              <button type="button" class="link danger" @click="remove(row)">删除</button>
             </td>
           </tr>
           <tr v-if="!documents.length">
-            <td :colspan="isAdmin ? 7 : 6" class="empty">暂无文档</td>
+            <td colspan="8" class="empty">暂无文档</td>
           </tr>
         </tbody>
       </table>
@@ -112,18 +139,18 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
-import { kbList, kbAdd, kbDelete, kbGet, kbImport, searchKB } from '../api'
+import { onMounted, reactive, ref } from 'vue'
+import { kbList, kbAdd, kbDelete, kbGet, kbImport, kbToggle, searchKB } from '../api'
 
-const user = JSON.parse(localStorage.getItem('user') || '{}')
-const isAdmin = computed(() => user.role === 'admin')
 const documents = ref([])
 const total = ref(0)
 const searchQuery = ref('')
 const filterType = ref('')
+const includeDisabled = ref(true)
 const showAdd = ref(false)
 const showImport = ref(false)
 const saving = ref(false)
+const togglingId = ref(null)
 const msg = ref('')
 const detail = ref(null)
 const files = ref([])
@@ -141,12 +168,6 @@ function formatDate(v) {
   return String(v).replace('T', ' ').slice(0, 19)
 }
 
-function shortPath(p) {
-  if (!p) return '-'
-  const s = String(p)
-  return s.length > 28 ? '...' + s.slice(-26) : s
-}
-
 async function load() {
   try {
     if (searchQuery.value.trim()) {
@@ -160,7 +181,8 @@ async function load() {
         title: d.title,
         doc_type: d.doc_type,
         source_url: d.source_url,
-        file_path: d.file_path,
+        enabled: true,
+        status: 'active',
         created_at: '',
         content_preview: d.content,
       }))
@@ -170,12 +192,31 @@ async function load() {
         doc_type: filterType.value || undefined,
         page: 1,
         page_size: 50,
+        include_disabled: includeDisabled.value,
       })
-      documents.value = res.data || []
+      documents.value = (res.data || []).map((d) => ({
+        ...d,
+        enabled: d.enabled !== false && d.status !== 'disabled' && d.status !== 'archived',
+      }))
       total.value = res.total || 0
     }
   } catch (e) {
     msg.value = e.message
+  }
+}
+
+async function toggle(row, ev) {
+  const next = !!ev.target.checked
+  togglingId.value = row.id
+  try {
+    await kbToggle(row.id, next)
+    row.enabled = next
+    row.status = next ? 'active' : 'disabled'
+  } catch (e) {
+    ev.target.checked = !next
+    alert(e.message || '切换失败')
+  } finally {
+    togglingId.value = null
   }
 }
 
@@ -222,7 +263,7 @@ async function doImport() {
 }
 
 async function remove(row) {
-  if (!confirm('确认删除文档 ' + row.id + ' ?')) return
+  if (!confirm('确认删除文档 ' + row.id + ' ？删除后不可从列表恢复（将归档）。')) return
   await kbDelete(row.id)
   await load()
 }
@@ -235,7 +276,7 @@ async function openDoc(row) {
       title: row.title,
       doc_type: row.doc_type,
       source_url: row.source_url,
-      content: row.content_preview || '',
+      content: row.content_preview || '（已停用文档可能无法直接查看全文）',
     }
   }
 }
@@ -250,6 +291,14 @@ onMounted(load)
   padding: 20px 24px;
 }
 
+.page-intro {
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  max-width: 900px;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;
@@ -259,7 +308,7 @@ onMounted(load)
 }
 
 .search {
-  width: 240px;
+  width: 220px;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 12px;
@@ -272,6 +321,14 @@ textarea {
   border-radius: 8px;
   padding: 8px 10px;
   font: inherit;
+}
+
+.check-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .btn {
@@ -313,13 +370,14 @@ td {
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 th {
   background: #fafafa;
   font-weight: 600;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 tr:hover td {
@@ -329,15 +387,79 @@ tr:hover td {
 
 .title {
   font-weight: 500;
-  max-width: 280px;
+  max-width: 240px;
 }
 
 .mono {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
   color: var(--text-secondary);
-  max-width: 200px;
+  max-width: 180px;
   word-break: break-all;
+}
+
+.status-pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.status-pill.on {
+  background: #f4f4f4;
+  color: #111;
+}
+
+.status-pill.off {
+  background: #fafafa;
+  color: #999;
+}
+
+/* toggle switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  inset: 0;
+  background: #d0d0d0;
+  border-radius: 999px;
+  transition: 0.15s;
+}
+
+.slider::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.15s;
+}
+
+.switch input:checked + .slider {
+  background: #111;
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(18px);
+}
+
+.switch input:disabled + .slider {
+  opacity: 0.5;
 }
 
 .empty {
@@ -352,6 +474,10 @@ tr:hover td {
   color: #666;
   text-decoration: underline;
   cursor: pointer;
+}
+
+.link.danger {
+  color: #888;
 }
 
 .modal {

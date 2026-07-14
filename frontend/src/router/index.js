@@ -15,13 +15,13 @@ const routes = [
     path: '/chat',
     name: 'Chat',
     component: () => import('../views/Chat.vue'),
-    meta: { title: '对话' },
+    meta: { title: '智能对话' },
   },
   {
-    path: '/knowledge',
-    name: 'Knowledge',
-    component: () => import('../views/KnowledgeBase.vue'),
-    meta: { title: '知识库' },
+    path: '/dashboard',
+    name: 'Dashboard',
+    component: () => import('../views/Dashboard.vue'),
+    meta: { title: '数据看板' },
   },
   {
     path: '/workbench',
@@ -30,10 +30,41 @@ const routes = [
     meta: { title: '内容工作台' },
   },
   {
+    path: '/multi-agent',
+    name: 'MultiAgent',
+    component: () => import('../views/MultiAgent.vue'),
+    meta: { title: '多智能体协调' },
+  },
+  {
+    path: '/help',
+    name: 'HelpCenter',
+    component: () => import('../views/HelpCenter.vue'),
+    meta: { title: '帮助中心' },
+  },
+  // —— 以下仅管理员 ——
+  {
+    path: '/knowledge',
+    name: 'Knowledge',
+    component: () => import('../views/KnowledgeBase.vue'),
+    meta: { title: '知识库管理', admin: true },
+  },
+  {
+    path: '/rag',
+    name: 'RagSettings',
+    component: () => import('../views/RagSettings.vue'),
+    meta: { title: 'RAG 参数', admin: true },
+  },
+  {
+    path: '/kb-status',
+    name: 'KbStatus',
+    component: () => import('../views/KbStatus.vue'),
+    meta: { title: '知识库状态', admin: true },
+  },
+  {
     path: '/admin',
     name: 'Admin',
     component: () => import('../views/Admin.vue'),
-    meta: { title: '管理', admin: true },
+    meta: { title: '系统管理', admin: true },
   },
 ]
 

@@ -39,6 +39,10 @@ from auth import (
 from rag_store import rag_params, vector_store, kb_status
 from ollama_client import ollama_reachable
 from seed_data import seed_all
+from data_fetcher import fetch_kline, source_catalog
+from chart_utils import kline_period_stats
+from multi_agent import run_multi_agent
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -50,7 +54,8 @@ async def lifespan(app: FastAPI):
     init_db()
     init_default_users()
     try:
-        stats = seed_all(force=False, index_rag=True)
+        # only seed content templates by default; no fake seed:// rows
+        stats = seed_all(force=False, index_rag=False)
         logger.info("[App] seed: %s", stats)
     except Exception as e:
         logger.warning("[App] seed skipped: %s", e)
@@ -294,11 +299,15 @@ async def kb_list(
     doc_type: str = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    include_disabled: bool = Query(False, description="管理员可查看已停用文档"),
     user: dict = Depends(require_user),
 ):
     db = SessionLocal()
     try:
-        query = db.query(KnowledgeDocument).filter(KnowledgeDocument.status == "active")
+        query = db.query(KnowledgeDocument)
+        # 普通用户只看启用文档；管理员可查看全部（含停用）
+        if user.get("role") != "admin" or not include_disabled:
+            query = query.filter(KnowledgeDocument.status == "active")
         if doc_type:
             query = query.filter(KnowledgeDocument.doc_type == doc_type)
         total = query.count()
@@ -314,6 +323,8 @@ async def kb_list(
                 "source_url": d.source_url or "",
                 "file_path": d.file_path or "",
                 "vector_id": d.vector_id or "",
+                "status": d.status or "active",
+                "enabled": (d.status or "active") == "active",
                 "created_at": str(d.created_at),
             } for d in docs],
         }
@@ -341,6 +352,59 @@ async def kb_get(doc_id: int, user: dict = Depends(require_user)):
             "source_url": doc.source_url, "file_path": doc.file_path,
             "created_at": str(doc.created_at), "updated_at": str(doc.updated_at),
         }
+    finally:
+        db.close()
+
+
+@app.patch("/api/kb/{doc_id}/toggle", tags=["知识库管理"])
+async def kb_toggle(
+    doc_id: int,
+    enabled: bool = Query(..., description="true=启用并参与RAG，false=停用并从索引移除"),
+    user: dict = Depends(require_admin),
+    agent: FinancialAnalysisAgent = Depends(get_financial_agent),
+):
+    """启用/停用知识库文档（开关）。停用后不参与检索，可再次启用。"""
+    db = SessionLocal()
+    try:
+        doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        if enabled:
+            doc.status = "active"
+            db.commit()
+            # 重新写入向量索引
+            if doc.content:
+                try:
+                    from rag_store import vector_store
+                    vector_store.add_document(
+                        doc_id=str(doc.id),
+                        title=doc.title or "",
+                        content=doc.content or "",
+                        source_url=doc.source_url or "",
+                        file_path=doc.file_path or "",
+                        doc_type=doc.doc_type or "自定义",
+                        tags=doc.tags or [],
+                        related_stocks=doc.related_stocks or [],
+                    )
+                    doc.vector_id = str(doc.id)
+                    db.commit()
+                except Exception as e:
+                    logger.warning("reindex on enable failed: %s", e)
+            return {"status": "ok", "doc_id": doc_id, "enabled": True, "message": "已启用"}
+        else:
+            doc.status = "disabled"
+            db.commit()
+            try:
+                from rag_store import vector_store
+                vector_store.delete_document(str(doc_id))
+            except Exception as e:
+                logger.warning("vector remove on disable: %s", e)
+            return {"status": "ok", "doc_id": doc_id, "enabled": False, "message": "已停用"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
@@ -472,7 +536,336 @@ async def dashboard_summary(user: dict = Depends(require_user)):
             "total_kb_docs": db.query(KnowledgeDocument).filter(KnowledgeDocument.status == "active").count(),
             "total_qa": db.query(InvestmentQA).count(),
             "vector_chunks": vector_store.chunk_count,
+            "data_sources": source_catalog(),
         }
+    finally:
+        db.close()
+
+
+@app.get("/api/dashboard/kline", tags=["仪表盘"])
+async def dashboard_kline(
+    stock_code: str = Query("600519", description="A股代码，如 600519"),
+    limit: int = Query(120, ge=10, le=500),
+    user: dict = Depends(require_user),
+):
+    """
+    看板 K 线：东方财富日K OHLC，附周期统计（最高/最低/MA）。
+    来源: https://push2his.eastmoney.com/api/qt/stock/kline/get
+    """
+    result = fetch_kline(stock_code, limit=limit)
+    if result.get("status") == "ok":
+        stats = kline_period_stats(result.get("data") or [])
+        result["stats"] = stats
+    return result
+
+
+class FeedbackRequest(BaseModel):
+    category: str = "other"
+    contact: str = ""
+    content: str = Field(..., min_length=1)
+
+
+class MultiAgentRequest(BaseModel):
+    question: str
+    stock_code: Optional[str] = None
+    context: Optional[str] = None
+
+
+class IngestReferencesRequest(BaseModel):
+    paths: Optional[list[str]] = None
+
+
+@app.post("/api/feedback", tags=["帮助中心"])
+async def post_feedback(req: FeedbackRequest, user: dict = Depends(require_user)):
+    """Persist user feedback to data/feedback.jsonl"""
+    from config import DATA_DIR
+    path = DATA_DIR / "feedback.jsonl"
+    import json
+    from datetime import datetime
+    rec = {
+        "username": user.get("username"),
+        "role": user.get("role"),
+        "category": req.category,
+        "contact": req.contact,
+        "content": req.content,
+        "at": datetime.utcnow().isoformat() + "Z",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return {"status": "ok", "message": "反馈已记录"}
+
+
+@app.post("/api/agent/multi", tags=["Agent"])
+async def multi_agent_endpoint(req: MultiAgentRequest, user: dict = Depends(require_user)):
+    """多智能体协调：分析师 → 投资者视角 → 审核 → 经理综合"""
+    result = run_multi_agent(
+        question=req.question,
+        context=req.context or "",
+        stock_code=req.stock_code or "",
+    )
+    return result
+
+
+@app.post("/api/admin/ingest-references", tags=["系统"])
+async def ingest_references(
+    req: IngestReferencesRequest,
+    user: dict = Depends(require_admin),
+    agent: FinancialAnalysisAgent = Depends(get_financial_agent),
+):
+    """Ingest reference md/txt/pdf snippets into KB with file path as source."""
+    from pathlib import Path as P
+    default_paths = [
+        r"C:\Users\klare\Downloads\项目小组提交\项目源码\产品需求分析与体验改进建议.md",
+        r"C:\Users\klare\Downloads\项目小组提交\项目源码\require_analys&user_responed.py",
+        r"C:\Users\klare\Desktop\华迪\项目源码\README.md",
+    ]
+    paths = req.paths or default_paths
+    indexed = []
+    errors = []
+    for p in paths:
+        fp = P(p)
+        if not fp.exists() or not fp.is_file():
+            errors.append({"path": p, "error": "not found"})
+            continue
+        try:
+            if fp.suffix.lower() in (".md", ".txt", ".py", ".json", ".sql", ".csv"):
+                text = fp.read_text(encoding="utf-8", errors="replace")
+            elif fp.suffix.lower() == ".pdf":
+                try:
+                    import PyPDF2
+                    reader = PyPDF2.PdfReader(str(fp))
+                    parts = []
+                    for i, page in enumerate(reader.pages[:25]):
+                        try:
+                            parts.append(page.extract_text() or "")
+                        except Exception:
+                            pass
+                    text = "\n".join(parts)
+                    if not text.strip():
+                        errors.append({"path": p, "error": "pdf no extractable text"})
+                        continue
+                except Exception as e:
+                    errors.append({"path": p, "error": f"pdf: {e}"})
+                    continue
+            else:
+                errors.append({"path": p, "error": f"unsupported type {fp.suffix}"})
+                continue
+            # chunk large files
+            chunks = [text[i:i + 6000] for i in range(0, min(len(text), 60000), 5500)]
+            for idx, chunk in enumerate(chunks):
+                title = fp.name if idx == 0 else f"{fp.name}#{idx + 1}"
+                source = fp.resolve().as_uri() if hasattr(fp, "as_uri") else f"file:///{fp}"
+                res = await agent.add_to_kb(
+                    title=title,
+                    content=chunk,
+                    doc_type="参考资料",
+                    tags=["reference", fp.suffix.lstrip(".")],
+                    related_stocks=[],
+                    source_url=source,
+                    file_path=str(fp.resolve()),
+                )
+                indexed.append({"title": title, **res})
+        except Exception as e:
+            errors.append({"path": p, "error": str(e)})
+    return {
+        "status": "ok",
+        "indexed_count": sum(1 for x in indexed if x.get("status") == "ok"),
+        "indexed": indexed[:50],
+        "errors": errors,
+    }
+
+
+@app.post("/api/dashboard/sync", tags=["仪表盘"])
+async def dashboard_sync(
+    stock_code: str = Query("600519"),
+    user: dict = Depends(require_admin),
+):
+    """管理员：按股票一键同步研报/新闻/公告/舆情真实数据入库。"""
+    reports = await mcp_handler.fetch_research_reports({"stock_code": stock_code, "limit": 20})
+    news = await mcp_handler.fetch_financial_news({"stock_code": stock_code, "limit": 20})
+    anns = await mcp_handler.fetch_company_announcements({"stock_code": stock_code, "limit": 20})
+    social = await mcp_handler.fetch_social_sentiment({"stock_code": stock_code, "limit": 30})
+    kline = fetch_kline(stock_code, limit=30)
+    return {
+        "status": "ok",
+        "stock_code": stock_code,
+        "reports": {"live": reports.get("live_fetched"), "total": reports.get("total")},
+        "news": {"live": news.get("live_fetched"), "total": news.get("total")},
+        "announcements": {"live": anns.get("live_fetched"), "total": anns.get("total")},
+        "social": {"live": social.get("live_fetched"), "total": social.get("total")},
+        "kline_points": kline.get("total"),
+        "sources": source_catalog(),
+    }
+
+
+@app.get("/api/data/sources", tags=["系统"])
+async def data_sources(user: dict = Depends(require_user)):
+    return {"status": "ok", "sources": source_catalog()}
+
+
+@app.post("/api/admin/purge-seed", tags=["系统"])
+async def purge_seed_and_rebuild(
+    stock_codes: str = Query("600519,300750,002594", description="逗号分隔股票代码"),
+    user: dict = Depends(require_admin),
+    agent: FinancialAnalysisAgent = Depends(get_financial_agent),
+):
+    """
+    清除 seed:// / 本地假数据，改用真实 URL 抓取重建：
+    - 删除 source_url 含 seed:// 的研报/新闻/知识库
+    - 清空向量索引后用真实研报/新闻/公告写入知识库
+    """
+    from rag_store import vector_store
+    codes = [c.strip() for c in (stock_codes or "").split(",") if c.strip()]
+    db = SessionLocal()
+    stats = {"deleted_reports": 0, "deleted_news": 0, "deleted_kb": 0, "indexed": 0, "synced": []}
+    try:
+        # 1) purge seed / non-http local rows — keep only real http(s) sources
+        for r in db.query(ResearchReport).all():
+            su = (r.source_url or "").strip()
+            if not (su.startswith("http://") or su.startswith("https://")):
+                db.delete(r)
+                stats["deleted_reports"] += 1
+        for n in db.query(FinancialNews).all():
+            u = (n.url or "").strip()
+            if not (u.startswith("http://") or u.startswith("https://")):
+                db.delete(n)
+                stats["deleted_news"] += 1
+        # wipe entire knowledge base then rebuild from live http sources
+        for d in db.query(KnowledgeDocument).all():
+            try:
+                vector_store.delete_document(str(d.id))
+            except Exception:
+                pass
+            db.delete(d)
+            stats["deleted_kb"] += 1
+        # clear leftover seed social that looks synthetic (optional: full clear social)
+        for srow in db.query(SocialSentiment).all():
+            # keep after resync; clear all pre-existing then live will refill
+            db.delete(srow)
+        for a in db.query(CompanyAnnouncement).all():
+            db.delete(a)
+        db.commit()
+        # empty vector store files
+        try:
+            vector_store.chunks = []
+            vector_store.matrix = None
+            vector_store._persist()
+        except Exception as e:
+            logger.warning("vector wipe: %s", e)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"purge failed: {e}")
+    finally:
+        db.close()
+
+    # 2) live sync per stock
+    for code in codes:
+        reports = await mcp_handler.fetch_research_reports({"stock_code": code, "limit": 15})
+        news = await mcp_handler.fetch_financial_news({"stock_code": code, "limit": 10})
+        anns = await mcp_handler.fetch_company_announcements({"stock_code": code, "limit": 10})
+        social = await mcp_handler.fetch_social_sentiment({"stock_code": code, "limit": 15})
+        stats["synced"].append({
+            "stock_code": code,
+            "reports": reports.get("total"),
+            "news": news.get("total"),
+            "announcements": anns.get("total"),
+            "social": social.get("total"),
+        })
+
+    # 3) rebuild KB from real-URL rows only
+    db = SessionLocal()
+    try:
+        # clear any leftover vector index
+        try:
+            # re-index from remaining + new real reports/news
+            pass
+        except Exception:
+            pass
+
+        real_reports = db.query(ResearchReport).filter(
+            ResearchReport.source_url.like("http%")
+        ).order_by(ResearchReport.report_date.desc()).limit(40).all()
+        for r in real_reports:
+            content = (r.full_content or r.core_viewpoint or r.title or "").strip()
+            if not content:
+                continue
+            # skip if already in KB with same source_url
+            exists = db.query(KnowledgeDocument).filter(
+                KnowledgeDocument.source_url == r.source_url,
+                KnowledgeDocument.status == "active",
+            ).first()
+            if exists:
+                continue
+            res = await agent.add_to_kb(
+                title=r.title,
+                content=content,
+                doc_type="研报",
+                tags=[r.institution or "", r.stock_code or ""],
+                related_stocks=[r.stock_code] if r.stock_code else [],
+                source_url=r.source_url or "",
+            )
+            if res.get("status") == "ok":
+                stats["indexed"] += 1
+
+        real_news = db.query(FinancialNews).filter(
+            FinancialNews.url.like("http%")
+        ).order_by(FinancialNews.publish_time.desc()).limit(30).all()
+        for n in real_news:
+            content = (n.content or n.summary or n.title or "").strip()
+            if not content:
+                continue
+            exists = db.query(KnowledgeDocument).filter(
+                KnowledgeDocument.source_url == n.url,
+                KnowledgeDocument.status == "active",
+            ).first()
+            if exists:
+                continue
+            res = await agent.add_to_kb(
+                title=n.title,
+                content=content,
+                doc_type="新闻",
+                tags=["财经新闻", n.source or ""],
+                related_stocks=n.related_stocks if isinstance(n.related_stocks, list) else [],
+                source_url=n.url or "",
+            )
+            if res.get("status") == "ok":
+                stats["indexed"] += 1
+
+        # announcements: use cninfo static url if stored in content; build from title+code
+        anns = db.query(CompanyAnnouncement).order_by(
+            CompanyAnnouncement.announce_date.desc()
+        ).limit(20).all()
+        for a in anns:
+            # prefer real-looking titles only after live sync
+            content = (a.content or a.summary or a.title or "").strip()
+            if not content:
+                continue
+            # announcements table may not have source_url column; build cninfo search link
+            src = f"http://www.cninfo.com.cn/new/disclosure/stock?stockCode={a.stock_code}&orgId="
+            exists = db.query(KnowledgeDocument).filter(
+                KnowledgeDocument.title == a.title,
+                KnowledgeDocument.doc_type == "公告",
+            ).first()
+            if exists:
+                continue
+            res = await agent.add_to_kb(
+                title=a.title,
+                content=content,
+                doc_type="公告",
+                tags=["公告", a.stock_code or ""],
+                related_stocks=[a.stock_code] if a.stock_code else [],
+                source_url=src,
+            )
+            if res.get("status") == "ok":
+                stats["indexed"] += 1
+
+        stats["kb_active"] = db.query(KnowledgeDocument).filter(
+            KnowledgeDocument.status == "active"
+        ).count()
+        stats["vector_chunks"] = vector_store.chunk_count
+        stats["status"] = "ok"
+        return stats
     finally:
         db.close()
 

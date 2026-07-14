@@ -12,7 +12,11 @@
             <option value="自定义">自定义</option>
           </select>
         </label>
-        <label>股票代码<input v-model="config.stockCode" placeholder="600519" /></label>
+        <label>
+          关注标的代码
+          <input v-model="config.stockCode" placeholder="例: 600519" />
+          <span class="field-hint">A股六位代码，用于绑定生成内容与知识库标签</span>
+        </label>
         <label>股票名称<input v-model="config.stockName" placeholder="贵州茅台" /></label>
         <label>模板
           <select v-model="config.templateId">
@@ -32,10 +36,24 @@
       <section class="output">
         <div class="out-head">
           <h3>生成结果</h3>
-          <button v-if="result" type="button" class="btn" @click="copy">复制</button>
+          <div class="out-actions">
+            <button v-if="result" type="button" class="btn sm" @click="copy">复制</button>
+            <button v-if="result" type="button" class="btn sm" @click="download">下载 Markdown</button>
+            <button
+              v-if="result && isAdmin"
+              type="button"
+              class="btn sm primary"
+              :disabled="savingKb"
+              @click="saveToKb"
+            >
+              {{ savingKb ? '入库中...' : '存入知识库' }}
+            </button>
+          </div>
         </div>
+        <p v-if="msg" class="msg">{{ msg }}</p>
         <div v-if="!result" class="placeholder">选择参数后生成投资内容</div>
         <div v-else class="markdown-body" v-html="rendered" />
+        <p v-if="result && !isAdmin" class="tip">提示：存入知识库需要管理员账号；你仍可复制或下载文件。</p>
       </section>
     </div>
   </div>
@@ -44,7 +62,10 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { marked } from 'marked'
-import { generateContent, batchPortfolio, templateList } from '../api'
+import { generateContent, batchPortfolio, templateList, kbAdd } from '../api'
+
+const user = JSON.parse(localStorage.getItem('user') || '{}')
+const isAdmin = user.role === 'admin'
 
 const config = reactive({
   contentType: '研报摘要',
@@ -55,7 +76,9 @@ const config = reactive({
 })
 const templates = ref([])
 const generating = ref(false)
+const savingKb = ref(false)
 const result = ref('')
+const msg = ref('')
 const rendered = computed(() => marked.parse(result.value || '', { breaks: true }))
 
 async function loadTemplates() {
@@ -69,6 +92,7 @@ async function loadTemplates() {
 
 async function generate() {
   generating.value = true
+  msg.value = ''
   try {
     const res = await generateContent({
       content_type: config.contentType,
@@ -87,6 +111,7 @@ async function generate() {
 
 async function portfolio() {
   generating.value = true
+  msg.value = ''
   try {
     const res = await batchPortfolio({
       stocks: [
@@ -106,6 +131,41 @@ async function portfolio() {
 
 function copy() {
   navigator.clipboard.writeText(result.value || '')
+  msg.value = '已复制到剪贴板'
+}
+
+function download() {
+  const text = result.value || ''
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
+  const a = document.createElement('a')
+  const name = `${config.contentType}_${config.stockCode || 'content'}_${Date.now()}.md`
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(a.href)
+  msg.value = '已开始下载: ' + name
+}
+
+async function saveToKb() {
+  if (!isAdmin || !result.value) return
+  savingKb.value = true
+  msg.value = ''
+  try {
+    const title = `${config.contentType}-${config.stockName || config.stockCode || '未命名'}-${new Date().toISOString().slice(0, 10)}`
+    await kbAdd({
+      title,
+      content: result.value,
+      doc_type: '自定义',
+      tags: [config.contentType, config.stockCode].filter(Boolean),
+      related_stocks: config.stockCode ? [config.stockCode] : [],
+      source_url: 'workbench://generated',
+    })
+    msg.value = '已存入知识库并参与 RAG 索引'
+  } catch (e) {
+    msg.value = '入库失败: ' + e.message
+  } finally {
+    savingKb.value = false
+  }
 }
 
 onMounted(loadTemplates)
@@ -145,6 +205,13 @@ label {
   margin-bottom: 12px;
 }
 
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 input,
 select,
 textarea {
@@ -173,22 +240,52 @@ textarea {
   border-color: #111;
 }
 
+.btn.sm {
+  width: auto;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .out-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
-.out-head .btn {
-  width: auto;
+.out-head h3 {
   margin: 0;
-  padding: 6px 12px;
+}
+
+.out-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .placeholder {
   color: var(--text-muted);
   padding: 40px 0;
   text-align: center;
+}
+
+.msg {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.tip {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 @media (max-width: 900px) {

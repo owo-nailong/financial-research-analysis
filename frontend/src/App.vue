@@ -5,6 +5,21 @@
 
   <div v-else class="shell">
     <aside class="sidebar" :class="{ collapsed }">
+      <!-- 品牌 + 模型 -->
+      <div class="brand" @click="goChat">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 40 40" width="32" height="32">
+            <rect width="40" height="40" rx="10" fill="#111" />
+            <path d="M10 26 L16 12 L22 22 L26 16 L30 26 Z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round" />
+            <circle cx="28" cy="12" r="2.2" fill="#fff" />
+          </svg>
+        </div>
+        <div v-if="!collapsed" class="brand-text">
+          <div class="brand-name">智研AI</div>
+          <div class="brand-model" :title="modelName">{{ modelName }}</div>
+        </div>
+      </div>
+
       <div class="side-top">
         <button class="new-chat" type="button" @click="goChat">
           <span class="icon-plus">+</span>
@@ -13,88 +28,53 @@
       </div>
 
       <nav class="nav">
+        <div v-if="!collapsed" class="nav-section-label">使用</div>
+        <div v-else class="nav-divider" />
         <router-link
-          v-for="item in navItems"
+          v-for="item in userNav"
           :key="item.path"
           :to="item.path"
           class="nav-item"
-          :class="{ active: route.path.startsWith(item.path) }"
+          :class="{ active: isActive(item.path) }"
+          :title="item.label"
         >
-          <span class="nav-label">{{ item.label }}</span>
+          <span v-if="collapsed" class="nav-short">{{ item.short }}</span>
+          <span v-else class="nav-label">{{ item.label }}</span>
         </router-link>
+
+        <template v-if="isAdmin">
+          <div v-if="!collapsed" class="nav-section-label admin-section">管理</div>
+          <div v-else class="nav-divider strong" />
+          <router-link
+            v-for="item in adminNav"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item admin-item"
+            :class="{ active: isActive(item.path) }"
+            :title="item.label + '（仅管理员）'"
+          >
+            <span v-if="collapsed" class="nav-short">{{ item.short }}</span>
+            <span v-else class="nav-label">{{ item.label }}</span>
+          </router-link>
+        </template>
       </nav>
 
-      <div v-if="!collapsed" class="side-panel">
-        <div class="panel-title">RAG 参数</div>
-        <div class="panel-body">
-          <label class="field">
-            <span>启用 RAG</span>
-            <input type="checkbox" v-model="ragForm.enabled" :disabled="!isAdmin" @change="saveRag" />
-          </label>
-          <label class="field">
-            <span>Top K</span>
-            <input type="number" min="1" max="20" v-model.number="ragForm.top_k" :disabled="!isAdmin" @change="saveRag" />
-          </label>
-          <label class="field">
-            <span>Chunk</span>
-            <input type="number" min="100" max="4000" step="50" v-model.number="ragForm.chunk_size" :disabled="!isAdmin" @change="saveRag" />
-          </label>
-          <label class="field">
-            <span>Overlap</span>
-            <input type="number" min="0" max="1000" step="10" v-model.number="ragForm.chunk_overlap" :disabled="!isAdmin" @change="saveRag" />
-          </label>
-          <label class="field">
-            <span>阈值</span>
-            <input type="number" min="0" max="1" step="0.05" v-model.number="ragForm.score_threshold" :disabled="!isAdmin" @change="saveRag" />
-          </label>
-          <p v-if="!isAdmin" class="hint">仅管理员可修改</p>
-        </div>
-
-        <div class="panel-title">知识库状态</div>
-        <div class="panel-body status-box">
-          <div class="status-row">
-            <span>向量索引</span>
-            <span>
-              <i class="dot" :class="kbUsable ? 'ok' : 'bad'" />
-              {{ kbUsable ? '可用' : '不可用' }}
-            </span>
-          </div>
-          <div class="status-row">
-            <span>文档数</span>
-            <span>{{ kbMeta.document_count ?? '-' }}</span>
-          </div>
-          <div class="status-row">
-            <span>分块数</span>
-            <span>{{ kbMeta.chunk_count ?? '-' }}</span>
-          </div>
-          <div class="status-row">
-            <span>嵌入服务</span>
-            <span>
-              <i class="dot" :class="embedOk ? 'ok' : 'bad'" />
-              {{ embedOk ? '在线' : '离线' }}
-            </span>
-          </div>
-          <div v-if="sources.length" class="sources">
-            <div class="sources-title">来源</div>
-            <div v-for="s in sources.slice(0, 6)" :key="s.doc_id" class="source-item">
-              <div class="source-name" :title="s.title">{{ s.title }}</div>
-              <div class="source-url" :title="s.source_url || s.file_path">
-                <i class="dot" :class="s.reachable ? 'ok' : 'warn'" />
-                {{ shortSource(s) }}
-              </div>
-            </div>
-          </div>
-          <button class="linkish" type="button" @click="refreshStatus">刷新状态</button>
-        </div>
-      </div>
+      <div class="side-spacer" />
 
       <div class="side-bottom">
         <button class="collapse-btn" type="button" @click="collapsed = !collapsed">
-          {{ collapsed ? '>' : '收起' }}
+          {{ collapsed ? '>' : '收起侧栏' }}
         </button>
         <div v-if="!collapsed" class="user-box">
           <div class="user-name">{{ user.display_name || user.username || '用户' }}</div>
-          <div class="user-role">{{ user.role === 'admin' ? '管理员' : '使用者' }}</div>
+          <div class="user-role">
+            <span class="role-badge" :class="isAdmin ? 'admin' : 'user'">
+              {{ isAdmin ? '管理员' : '使用者' }}
+            </span>
+          </div>
+          <p class="role-hint">
+            {{ isAdmin ? '可管理知识库、RAG 参数与用户' : '可对话与生成内容，不可改知识库配置' }}
+          </p>
           <button class="logout" type="button" @click="logout">退出</button>
         </div>
       </div>
@@ -118,9 +98,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getRagParams, updateRagParams, kbStatus, healthCheck } from './api'
+import { healthCheck } from './api'
 
 const route = useRoute()
 const router = useRouter()
@@ -129,33 +109,29 @@ const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 const isLoginPage = computed(() => route.path === '/login')
 const isAdmin = computed(() => user.value?.role === 'admin')
 
-const navItems = computed(() => {
-  const items = [
-    { path: '/chat', label: '智能对话' },
-    { path: '/knowledge', label: '知识库' },
-    { path: '/workbench', label: '内容工作台' },
-  ]
-  if (isAdmin.value) items.push({ path: '/admin', label: '系统管理' })
-  return items
-})
+/** 使用者可见 */
+const userNav = [
+  { path: '/chat', label: '智能对话', short: '对话' },
+  { path: '/dashboard', label: '数据看板', short: '看板' },
+  { path: '/workbench', label: '内容工作台', short: '工作台' },
+  { path: '/multi-agent', label: '多智能体', short: '协同' },
+  { path: '/help', label: '帮助中心', short: '帮助' },
+]
 
-const ragForm = reactive({
-  enabled: true,
-  top_k: 5,
-  chunk_size: 800,
-  chunk_overlap: 120,
-  score_threshold: 0.15,
-})
-const kbMeta = ref({})
-const sources = ref([])
-const embedOk = ref(false)
-const kbUsable = ref(false)
+/** 仅管理员：知识库与系统配置 */
+const adminNav = [
+  { path: '/knowledge', label: '知识库管理', short: '库' },
+  { path: '/rag', label: 'RAG 参数', short: 'RAG' },
+  { path: '/kb-status', label: '知识库状态', short: '状态' },
+  { path: '/admin', label: '系统管理', short: '管理' },
+]
+
 const systemOk = ref(false)
 const systemLabel = ref('检测中')
+const modelName = ref('加载中...')
 
-function shortSource(s) {
-  const u = s.source_url || s.file_path || '无来源'
-  return u.length > 36 ? u.slice(0, 34) + '...' : u
+function isActive(path) {
+  return route.path === path || route.path.startsWith(path + '/')
 }
 
 function goChat() {
@@ -168,49 +144,26 @@ function logout() {
   router.push('/login')
 }
 
-async function loadRag() {
+async function refreshHealth() {
   try {
-    const res = await getRagParams()
-    Object.assign(ragForm, res.params || {})
-    kbMeta.value = res.store || {}
-  } catch {
-    /* ignore when not logged in */
-  }
-}
-
-async function saveRag() {
-  if (!isAdmin.value) return
-  try {
-    const res = await updateRagParams({ ...ragForm })
-    Object.assign(ragForm, res.params || {})
-  } catch (e) {
-    console.error(e)
-  }
-}
-
-async function refreshStatus() {
-  try {
-    const [st, health] = await Promise.all([kbStatus(), healthCheck()])
-    sources.value = st.sources || []
-    kbMeta.value = st.vector_store || {}
-    embedOk.value = !!st.embedding?.reachable
-    kbUsable.value = !!st.vector_store?.usable
+    const health = await healthCheck()
     systemOk.value = health.status === 'ok'
     const db = health.database?.backend || '?'
     const redis = health.redis?.ok ? 'Redis' : 'NoRedis'
     const llm = health.ollama?.ok ? 'Ollama' : 'NoLLM'
     systemLabel.value = `${db} / ${redis} / ${llm}`
+    modelName.value = health.llm?.model || health.ollama?.models?.[0] || '本地模型'
   } catch {
     systemOk.value = false
     systemLabel.value = '后端未连接'
+    modelName.value = '模型未连接'
   }
 }
 
 onMounted(async () => {
   if (!isLoginPage.value) {
     user.value = JSON.parse(localStorage.getItem('user') || '{}')
-    await loadRag()
-    await refreshStatus()
+    await refreshHealth()
   }
 })
 
@@ -219,7 +172,7 @@ watch(
   async () => {
     if (!isLoginPage.value) {
       user.value = JSON.parse(localStorage.getItem('user') || '{}')
-      await refreshStatus()
+      await refreshHealth()
     }
   }
 )
@@ -237,7 +190,7 @@ watch(
 }
 
 .sidebar {
-  width: 260px;
+  width: 248px;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
@@ -247,17 +200,59 @@ watch(
 }
 
 .sidebar.collapsed {
-  width: 64px;
+  width: 72px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.sidebar.collapsed .brand {
+  justify-content: center;
+  padding: 14px 8px 8px;
+}
+
+.logo {
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.brand-text {
+  min-width: 0;
+}
+
+.brand-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.brand-model {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
 }
 
 .side-top {
-  padding: 12px;
+  padding: 10px 12px 6px;
 }
 
 .new-chat {
   width: 100%;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -266,6 +261,10 @@ watch(
   cursor: pointer;
   color: var(--text);
   font-size: 14px;
+}
+
+.sidebar:not(.collapsed) .new-chat {
+  justify-content: flex-start;
 }
 
 .new-chat:hover {
@@ -285,11 +284,45 @@ watch(
   gap: 2px;
 }
 
+.nav-section-label {
+  margin: 10px 8px 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+.nav-section-label.admin-section {
+  margin-top: 14px;
+  color: #666;
+}
+
+.nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 6px;
+}
+
+.nav-divider.strong {
+  margin-top: 12px;
+  background: #d0d0d0;
+}
+
 .nav-item {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 14px;
+  display: block;
+  text-align: left;
+}
+
+.sidebar.collapsed .nav-item {
+  text-align: center;
+  padding: 10px 6px;
+  font-size: 12px;
 }
 
 .nav-item:hover {
@@ -301,113 +334,12 @@ watch(
   font-weight: 600;
 }
 
-.side-panel {
+.nav-item.admin-item {
+  color: #333;
+}
+
+.side-spacer {
   flex: 1;
-  overflow-y: auto;
-  padding: 0 12px 12px;
-  border-top: 1px solid var(--border);
-}
-
-.panel-title {
-  margin-top: 14px;
-  margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: none;
-  letter-spacing: 0.02em;
-}
-
-.panel-body {
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
-}
-
-.field {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
-}
-
-.field input[type='number'] {
-  width: 72px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 6px;
-  font-size: 12px;
-  background: #fff;
-}
-
-.field input[type='checkbox'] {
-  width: 14px;
-  height: 14px;
-}
-
-.hint {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.status-box {
-  font-size: 12px;
-}
-
-.status-row {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  color: var(--text-secondary);
-}
-
-.sources {
-  margin-top: 8px;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
-
-.sources-title {
-  font-weight: 600;
-  margin-bottom: 6px;
-  color: var(--text);
-}
-
-.source-item {
-  margin-bottom: 8px;
-}
-
-.source-name {
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.source-url {
-  color: var(--text-muted);
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.linkish {
-  margin-top: 8px;
-  border: none;
-  background: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  text-decoration: underline;
-  padding: 0;
 }
 
 .side-bottom {
@@ -422,6 +354,12 @@ watch(
   cursor: pointer;
   font-size: 12px;
   margin-bottom: 8px;
+  width: 100%;
+  text-align: left;
+}
+
+.sidebar.collapsed .collapse-btn {
+  text-align: center;
 }
 
 .user-box {
@@ -433,8 +371,30 @@ watch(
 }
 
 .user-role {
+  margin: 6px 0 4px;
+}
+
+.role-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-secondary);
+}
+
+.role-badge.admin {
+  border-color: #111;
+  color: #111;
+  font-weight: 600;
+}
+
+.role-hint {
+  font-size: 11px;
   color: var(--text-muted);
-  margin: 2px 0 8px;
+  line-height: 1.45;
+  margin-bottom: 10px;
 }
 
 .logout {

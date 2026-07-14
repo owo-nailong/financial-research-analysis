@@ -17,12 +17,26 @@
             </button>
           </div>
           <div class="composer-tools">
-            <label class="check">
+            <label class="check" title="开启后会从知识库检索相关片段再回答">
               <input type="checkbox" v-model="useRag" />
-              RAG 检索
+              启用知识库检索
             </label>
-            <input v-model="stockCode" class="stock" placeholder="股票代码 可选" />
+            <div class="stock-field">
+              <label class="stock-label">
+                关注标的代码
+                <span class="help" title="填写 A 股六位代码可缩小分析范围，例如 600519=贵州茅台、300750=宁德时代。不填则按问题全文理解。">?</span>
+              </label>
+              <input
+                v-model="stockCode"
+                class="stock"
+                placeholder="例: 600519"
+                maxlength="10"
+              />
+            </div>
           </div>
+          <p class="tool-hint">
+            「关注标的代码」指股票的交易所代码（不是用户账号）。填了之后，快捷分析与工具会优先查该股票的研报、评级与情绪；不填也可以直接用自然语言提问。
+          </p>
           <div class="suggestions">
             <button
               v-for="s in suggestions"
@@ -87,14 +101,26 @@
         </button>
       </div>
       <div class="composer-tools">
-        <label class="check">
+        <label class="check" title="开启后会从知识库检索相关片段再回答">
           <input type="checkbox" v-model="useRag" />
-          RAG 检索
+          启用知识库检索
         </label>
-        <input v-model="stockCode" class="stock" placeholder="股票代码 可选" />
+        <div class="stock-field">
+          <label class="stock-label">
+            关注标的代码
+            <span class="help" title="A 股六位代码，如 600519。用于限定研报/评级/情绪分析范围。">?</span>
+          </label>
+          <input v-model="stockCode" class="stock" placeholder="例: 600519" maxlength="10" />
+        </div>
         <button type="button" class="ghost" @click="clearChat">清除会话</button>
-        <button type="button" class="ghost" :disabled="!stockCode || loading" @click="runQuick">
-          快捷分析
+        <button
+          type="button"
+          class="ghost"
+          :disabled="!stockCode || loading"
+          :title="stockCode ? '一键拉取该股票的情绪、评级与观点对比' : '请先填写关注标的代码'"
+          @click="runQuick"
+        >
+          快捷分析该标的
         </button>
       </div>
     </div>
@@ -296,12 +322,51 @@ async function runQuick() {
   gap: 6px;
 }
 
+.stock-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stock-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid #ccc;
+  font-size: 10px;
+  color: #888;
+  cursor: help;
+}
+
 .stock {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 12px;
-  width: 120px;
+  width: 110px;
+}
+
+.tool-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  text-align: center;
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .ghost {

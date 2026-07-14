@@ -41,6 +41,15 @@ export const createUser = (payload) => api.post('/auth/users', payload)
 export const healthCheck = () => api.get('/health')
 export const listTools = () => api.get('/tools')
 export const dashboardSummary = () => api.get('/dashboard/summary')
+export const dashboardKline = (stockCode = '600519', limit = 90) =>
+  api.get('/dashboard/kline', { params: { stock_code: stockCode, limit } })
+export const dashboardSync = (stockCode = '600519') =>
+  api.post(`/dashboard/sync?stock_code=${encodeURIComponent(stockCode)}`)
+export const dataSources = () => api.get('/data/sources')
+
+export const submitFeedback = (payload) => api.post('/feedback', payload)
+export const multiAgentRun = (payload) => api.post('/agent/multi', payload, { timeout: 600000 })
+export const ingestReferences = (paths) => api.post('/admin/ingest-references', { paths })
 
 export const fetchReports = (params) => api.post('/fetch/reports', params)
 export const fetchNews = (params) => api.post('/fetch/news', params)
@@ -71,6 +80,8 @@ export const clearSession = (sessionId) => api.delete(`/agent/sessions/${session
 export const kbAdd = (params) => api.post('/kb/add', params)
 export const kbGet = (docId) => api.get(`/kb/${docId}`)
 export const kbDelete = (docId) => api.delete(`/kb/${docId}`)
+export const kbToggle = (docId, enabled) =>
+  api.patch(`/kb/${docId}/toggle?enabled=${enabled ? 'true' : 'false'}`)
 export const kbList = (params) => api.get('/kb/list', { params })
 export const kbStatus = () => api.get('/kb/status')
 
