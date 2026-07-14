@@ -1,0 +1,10 @@
+﻿node_modules/
+data/
+__pycache__/
+*.pyc
+.env
+.playwright-mcp/
+dist/
+*.db
+vector_store/
+uploads/
