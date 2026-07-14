@@ -53,6 +53,110 @@ def to_secid(stock_code: str) -> str:
     return f"0.{code}"
 
 
+def search_stocks(query: str, limit: int = 10) -> list[dict]:
+    """
+    Search A-share by code or Chinese name.
+    Primary: East Money suggest API; fallback: Tencent smartbox.
+    Returns list of {code, name, market, security_type}.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    limit = max(1, min(int(limit), 30))
+    results: list[dict] = []
+
+    # 1) East Money suggest
+    try:
+        url = "https://searchapi.eastmoney.com/api/suggest/get"
+        params = {
+            "input": q,
+            "type": "14",
+            "token": "D43BF722C8E33BDC906FB84D85E326E8",
+            "count": limit,
+        }
+        resp = SESSION.get(url, params=params, timeout=12, headers={"Referer": "https://www.eastmoney.com/"})
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        # shape: {QuotationCodeTable: {Data: [{Code, Name, MktNum, SecurityTypeName, ...}]}}
+        table = payload.get("QuotationCodeTable") or payload.get("data") or {}
+        rows = table.get("Data") if isinstance(table, dict) else None
+        if rows is None and isinstance(payload.get("data"), list):
+            rows = payload["data"]
+        for row in rows or []:
+            code = str(row.get("Code") or row.get("code") or "").strip()
+            name = str(row.get("Name") or row.get("name") or "").strip()
+            if not code or not re.fullmatch(r"\d{6}", code):
+                continue
+            results.append({
+                "code": code,
+                "name": name,
+                "market": str(row.get("MktNum") or row.get("market") or ""),
+                "security_type": str(row.get("SecurityTypeName") or row.get("securityTypeName") or "A股"),
+            })
+    except Exception as e:
+        logger.warning("eastmoney stock search failed: %s", e)
+
+    # 2) Tencent smartbox fallback
+    if not results:
+        try:
+            url = "https://smartbox.gtimg.cn/s3/"
+            params = {"v": "2", "q": q, "t": "all"}
+            resp = SESSION.get(url, params=params, timeout=12, headers={"Referer": "https://gu.qq.com/"})
+            resp.raise_for_status()
+            text = resp.text or ""
+            # v_hint="sh~贵州茅台~600519~...^sz~..."
+            body = text.split("=", 1)[-1].strip().strip('"').strip("'")
+            for part in body.split("^"):
+                cols = part.split("~")
+                if len(cols) < 3:
+                    continue
+                market, name, code = cols[0], cols[1], cols[2]
+                if not re.fullmatch(r"\d{6}", code):
+                    continue
+                results.append({
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "security_type": "A股",
+                })
+                if len(results) >= limit:
+                    break
+        except Exception as e:
+            logger.warning("tencent stock search failed: %s", e)
+
+    # Deduplicate by code, keep order
+    seen = set()
+    unique = []
+    for item in results:
+        if item["code"] in seen:
+            continue
+        seen.add(item["code"])
+        unique.append(item)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def resolve_stock_query(query: str) -> dict:
+    """
+    Resolve free-text (code or name) to {code, name}.
+    Pure 6-digit code is returned as-is (name may still be filled via search).
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"code": "", "name": ""}
+    if re.fullmatch(r"\d{6}", q):
+        hits = search_stocks(q, limit=5)
+        for h in hits:
+            if h.get("code") == q:
+                return {"code": q, "name": h.get("name") or ""}
+        return {"code": q, "name": ""}
+    hits = search_stocks(q, limit=5)
+    if hits:
+        return {"code": hits[0]["code"], "name": hits[0].get("name") or q}
+    return {"code": "", "name": q}
+
+
 def _parse_date(s: Any) -> Optional[date]:
     if not s:
         return None
@@ -115,7 +219,20 @@ def _fetch_kline_tencent(stock_code: str, limit: int) -> dict:
     data = (payload.get("data") or {}).get(sym) or {}
     rows = data.get("qfqday") or data.get("day") or []
     name = ""
-    # qt may include name elsewhere
+    try:
+        # qt realtime may include Chinese name
+        qt = SESSION.get(
+            "https://qt.gtimg.cn/q=" + sym,
+            timeout=8,
+            headers={"Referer": "https://gu.qq.com/"},
+        )
+        # v_sh600519="1~贵州茅台~600519~..."
+        part = (qt.text or "").split("=", 1)[-1].strip().strip('"')
+        cols = part.split("~")
+        if len(cols) > 1:
+            name = cols[1]
+    except Exception:
+        pass
     points = []
     for row in rows:
         # [date, open, close, high, low, volume]
@@ -132,6 +249,8 @@ def _fetch_kline_tencent(stock_code: str, limit: int) -> dict:
         })
     if not points:
         raise RuntimeError("tencent kline empty")
+    if not name:
+        name = resolve_stock_query(stock_code).get("name") or ""
     return {
         "status": "ok",
         "source": "tencent_kline",
@@ -164,12 +283,13 @@ def _fetch_kline_sina(stock_code: str, limit: int) -> dict:
             "volume": float(row.get("volume") or 0),
             "amount": None,
         })
+    name = resolve_stock_query(stock_code).get("name") or ""
     return {
         "status": "ok",
         "source": "sina_kline",
         "source_url": url,
         "stock_code": stock_code,
-        "stock_name": "",
+        "stock_name": name,
         "total": len(points),
         "data": points,
     }

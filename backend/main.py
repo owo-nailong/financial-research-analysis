@@ -30,16 +30,22 @@ from models import (
     KnowledgeSearchRequest, ContentGenerateRequest, PortfolioAnalysisRequest,
     AgentChatRequest, AgentChatResponse, KnowledgeAddRequest,
     TemplateCreateRequest, TemplateUpdateRequest, RagParamsUpdate, CreateUserRequest,
+    ChangePasswordRequest, AdminSetPasswordRequest,
 )
-from config import SERVER_CONFIG, UPLOAD_DIR, AUTH_CONFIG, LLM_CONFIG, OLLAMA_BASE_URL
+from config import (
+    SERVER_CONFIG, UPLOAD_DIR, AUTH_CONFIG, LLM_CONFIG, OLLAMA_BASE_URL,
+    REDIS_CONFIG, BASE_DIR,
+)
 from auth import (
     verify_password, create_token, require_user, require_admin,
     get_current_user, list_users_safe, create_user, init_default_users,
+    change_own_password, admin_set_password,
 )
+from crypto_auth import get_public_key_pem, decrypt_password_b64
 from rag_store import rag_params, vector_store, kb_status
 from ollama_client import ollama_reachable
 from seed_data import seed_all
-from data_fetcher import fetch_kline, source_catalog
+from data_fetcher import fetch_kline, source_catalog, search_stocks, resolve_stock_query
 from chart_utils import kline_period_stats
 from multi_agent import run_multi_agent
 from pydantic import BaseModel, Field
@@ -88,9 +94,36 @@ def get_financial_agent() -> FinancialAnalysisAgent:
 
 
 # -------------------- Auth --------------------
+def _require_encrypted_password(password: Optional[str], password_encrypted: Optional[str]) -> str:
+    """Reject plaintext passwords; only accept RSA-OAEP ciphertext."""
+    if password and str(password).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="禁止明文传输密码，请使用 RSA-OAEP 加密后的 password_encrypted 字段",
+        )
+    if not password_encrypted:
+        raise HTTPException(status_code=400, detail="缺少 password_encrypted")
+    try:
+        return decrypt_password_b64(password_encrypted)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/auth/public-key", tags=["认证"])
+async def auth_public_key():
+    """RSA public key (PEM) for client-side password encryption (RSA-OAEP SHA-256)."""
+    return {
+        "status": "ok",
+        "algorithm": "RSA-OAEP",
+        "hash": "SHA-256",
+        "public_key_pem": get_public_key_pem(),
+    }
+
+
 @app.post("/api/auth/login", tags=["认证"])
 async def login(req: LoginRequest):
-    user = verify_password(req.username, req.password)
+    plain = _require_encrypted_password(req.password, req.password_encrypted)
+    user = verify_password(req.username, plain)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_token(user["username"], user["role"])
@@ -106,6 +139,29 @@ async def me(user: dict = Depends(require_user)):
     return {"status": "ok", "user": user}
 
 
+@app.post("/api/auth/change-password", tags=["认证"])
+async def change_password(req: ChangePasswordRequest, user: dict = Depends(require_user)):
+    """Any logged-in user can change their own password (encrypted transport)."""
+    try:
+        old_pw = decrypt_password_b64(req.old_password_encrypted)
+        new_pw = decrypt_password_b64(req.new_password_encrypted)
+        change_own_password(user["username"], old_pw, new_pw)
+        return {"status": "ok", "message": "密码已更新"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/auth/admin/set-password", tags=["认证"])
+async def admin_reset_password(req: AdminSetPasswordRequest, user: dict = Depends(require_admin)):
+    """Admin can set any user's password (encrypted transport)."""
+    try:
+        new_pw = decrypt_password_b64(req.new_password_encrypted)
+        admin_set_password(req.username, new_pw)
+        return {"status": "ok", "message": f"已重置用户 {req.username} 的密码"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.get("/api/auth/users", tags=["认证"])
 async def users_list(user: dict = Depends(require_admin)):
     return {"status": "ok", "data": list_users_safe()}
@@ -114,7 +170,8 @@ async def users_list(user: dict = Depends(require_admin)):
 @app.post("/api/auth/users", tags=["认证"])
 async def users_create(req: CreateUserRequest, user: dict = Depends(require_admin)):
     try:
-        created = create_user(req.username, req.password, req.role)
+        plain = _require_encrypted_password(req.password, req.password_encrypted)
+        created = create_user(req.username, plain, req.role, req.display_name or "")
         return {"status": "ok", "user": created}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -132,7 +189,11 @@ async def health_check():
         "version": "2.0.0",
         "tools_count": len(MCP_TOOL_DEFINITIONS),
         "database": db_h,
-        "redis": {"ok": redis.available, "host": "localhost"},
+        "redis": {
+            "ok": redis.available,
+            "host": REDIS_CONFIG.get("host", "localhost"),
+            "port": REDIS_CONFIG.get("port", 6379),
+        },
         "ollama": ollama,
         "llm": {
             "provider": LLM_CONFIG.get("provider"),
@@ -305,7 +366,9 @@ async def kb_list(
     db = SessionLocal()
     try:
         query = db.query(KnowledgeDocument)
-        # 普通用户只看启用文档；管理员可查看全部（含停用）
+        # Never list permanently-removed legacy rows if any remain as archived
+        query = query.filter(KnowledgeDocument.status != "archived")
+        # 普通用户只看启用文档；管理员可查看停用（disabled）文档
         if user.get("role") != "admin" or not include_disabled:
             query = query.filter(KnowledgeDocument.status == "active")
         if doc_type:
@@ -455,7 +518,7 @@ async def kb_batch_import(
                 title=title,
                 content=content,
                 doc_type=doc_type or "自定义",
-                source_url=source_url or f"file://{f.filename}",
+                source_url=source_url or f"import://{f.filename}",
                 file_path=str(dest),
             )
             results.append({"filename": f.filename, **res})
@@ -468,16 +531,20 @@ async def kb_batch_import(
 # -------------------- RAG params --------------------
 @app.get("/api/rag/params", tags=["RAG"])
 async def get_rag_params(user: dict = Depends(require_user)):
+    from rag_store import _display_path
     return {"status": "ok", "params": rag_params.get(), "store": {
         "document_count": vector_store.doc_count,
         "chunk_count": vector_store.chunk_count,
-        "path": str(vector_store.directory),
+        "path": _display_path(vector_store.directory),
     }}
 
 
 @app.put("/api/rag/params", tags=["RAG"])
 async def update_rag_params(req: RagParamsUpdate, user: dict = Depends(require_admin)):
-    updated = rag_params.update(req.model_dump(exclude_none=True))
+    try:
+        updated = rag_params.update(req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"status": "ok", "params": updated}
 
 
@@ -550,18 +617,35 @@ async def dashboard_summary(user: dict = Depends(require_user)):
         db.close()
 
 
+@app.get("/api/dashboard/stock-search", tags=["仪表盘"])
+async def dashboard_stock_search(
+    q: str = Query(..., min_length=1, description="股票代码或名称关键词"),
+    limit: int = Query(10, ge=1, le=30),
+    user: dict = Depends(require_user),
+):
+    """按代码/名称搜索 A 股，返回 code + name 列表。"""
+    items = search_stocks(q, limit=limit)
+    return {"status": "ok", "query": q, "total": len(items), "data": items}
+
+
 @app.get("/api/dashboard/kline", tags=["仪表盘"])
 async def dashboard_kline(
-    stock_code: str = Query("600519", description="A股代码，如 600519"),
+    stock_code: str = Query("600519", description="A股代码或名称，如 600519 / 贵州茅台"),
     limit: int = Query(120, ge=10, le=500),
     user: dict = Depends(require_user),
 ):
     """
     看板 K 线：东方财富日K OHLC，附周期统计（最高/最低/MA）。
-    来源: https://push2his.eastmoney.com/api/qt/stock/kline/get
+    支持输入代码或中文名称；名称会先解析为代码。
     """
-    result = fetch_kline(stock_code, limit=limit)
+    resolved = resolve_stock_query(stock_code)
+    code = resolved.get("code") or (stock_code or "").strip()
+    result = fetch_kline(code, limit=limit)
     if result.get("status") == "ok":
+        if not result.get("stock_name") and resolved.get("name"):
+            result["stock_name"] = resolved["name"]
+        if resolved.get("code"):
+            result["stock_code"] = resolved["code"]
         stats = kline_period_stats(result.get("data") or [])
         result["stats"] = stats
     return result
@@ -621,18 +705,39 @@ async def ingest_references(
     user: dict = Depends(require_admin),
     agent: FinancialAnalysisAgent = Depends(get_financial_agent),
 ):
-    """Ingest reference md/txt/pdf snippets into KB with file path as source."""
+    """
+    Ingest reference docs into KB.
+
+    Paths are portable: relative paths resolve against project root
+    (e.g. README.md, docs/sample.md). Absolute paths still accepted if present.
+    Default: project README + optional docs/ folder text files.
+    """
     from pathlib import Path as P
-    default_paths = [
-        r"C:\Users\klare\Downloads\项目小组提交\项目源码\产品需求分析与体验改进建议.md",
-        r"C:\Users\klare\Downloads\项目小组提交\项目源码\require_analys&user_responed.py",
-        r"C:\Users\klare\Desktop\华迪\项目源码\README.md",
-    ]
+    from config import BASE_DIR
+
+    def _resolve(p: str) -> P:
+        fp = P(p)
+        if not fp.is_absolute():
+            fp = (BASE_DIR / fp).resolve()
+        return fp
+
+    # Portable defaults — no machine-specific absolute paths
+    default_paths: list[str] = ["README.md"]
+    docs_dir = BASE_DIR / "docs"
+    if docs_dir.is_dir():
+        for f in sorted(docs_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in (".md", ".txt", ".py", ".json", ".sql", ".csv"):
+                default_paths.append(str(P("docs") / f.name))
+
     paths = req.paths or default_paths
     indexed = []
     errors = []
     for p in paths:
-        fp = P(p)
+        fp = _resolve(p)
+        try:
+            rel = str(fp.relative_to(BASE_DIR.resolve())).replace("\\", "/")
+        except ValueError:
+            rel = fp.name
         if not fp.exists() or not fp.is_file():
             errors.append({"path": p, "error": "not found"})
             continue
@@ -659,11 +764,11 @@ async def ingest_references(
             else:
                 errors.append({"path": p, "error": f"unsupported type {fp.suffix}"})
                 continue
-            # chunk large files
             chunks = [text[i:i + 6000] for i in range(0, min(len(text), 60000), 5500)]
             for idx, chunk in enumerate(chunks):
                 title = fp.name if idx == 0 else f"{fp.name}#{idx + 1}"
-                source = fp.resolve().as_uri() if hasattr(fp, "as_uri") else f"file:///{fp}"
+                # Store portable relative reference, not absolute local path
+                source = f"project://{rel}"
                 res = await agent.add_to_kb(
                     title=title,
                     content=chunk,
@@ -671,7 +776,7 @@ async def ingest_references(
                     tags=["reference", fp.suffix.lstrip(".")],
                     related_stocks=[],
                     source_url=source,
-                    file_path=str(fp.resolve()),
+                    file_path=rel,
                 )
                 indexed.append({"title": title, **res})
         except Exception as e:
@@ -681,6 +786,7 @@ async def ingest_references(
         "indexed_count": sum(1 for x in indexed if x.get("status") == "ok"),
         "indexed": indexed[:50],
         "errors": errors,
+        "defaults": default_paths,
     }
 
 
@@ -710,6 +816,48 @@ async def dashboard_sync(
 @app.get("/api/data/sources", tags=["系统"])
 async def data_sources(user: dict = Depends(require_user)):
     return {"status": "ok", "sources": source_catalog()}
+
+
+@app.post("/api/admin/purge-local-paths", tags=["系统"])
+async def purge_local_path_docs(
+    user: dict = Depends(require_admin),
+    agent: FinancialAnalysisAgent = Depends(get_financial_agent),
+):
+    """
+    永久删除知识库中带本机绝对路径 / file:// 的文档（便于分享仓库前清理）。
+    不会删除 http(s):// 与 project:// 来源。
+    """
+    db = SessionLocal()
+    deleted = []
+    try:
+        docs = db.query(KnowledgeDocument).all()
+        for d in docs:
+            su = (d.source_url or "").strip()
+            fp = (d.file_path or "").strip()
+            bad = (
+                su.startswith("file:")
+                or "file:///" in su
+                or su.startswith("C:")
+                or su.startswith("/Users/")
+                or "C:/Users/" in su
+                or "C:\\Users\\" in su
+                or (fp.startswith("C:") or fp.startswith("/Users/") or ":\\" in fp[:3])
+            )
+            if not bad:
+                continue
+            deleted.append({"id": d.id, "title": d.title, "source_url": su})
+            try:
+                vector_store.delete_document(str(d.id))
+            except Exception:
+                pass
+            db.delete(d)
+        db.commit()
+        return {"status": "ok", "deleted_count": len(deleted), "deleted": deleted}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    finally:
+        db.close()
 
 
 @app.post("/api/admin/purge-seed", tags=["系统"])

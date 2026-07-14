@@ -41,6 +41,12 @@ const routes = [
     component: () => import('../views/HelpCenter.vue'),
     meta: { title: '帮助中心' },
   },
+  {
+    path: '/security',
+    name: 'Security',
+    component: () => import('../views/Security.vue'),
+    meta: { title: '安全管理', userOnly: true },
+  },
   // —— 以下仅管理员 ——
   {
     path: '/knowledge',
@@ -77,13 +83,13 @@ router.beforeEach((to, from, next) => {
   if (to.meta.public) return next()
   const token = localStorage.getItem('token')
   if (!token) return next({ path: '/login', query: { redirect: to.fullPath } })
-  if (to.meta.admin) {
-    try {
-      const user = JSON.parse(localStorage.getItem('user') || '{}')
-      if (user.role !== 'admin') return next('/chat')
-    } catch {
-      return next('/login')
-    }
+  try {
+    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    if (to.meta.admin && user.role !== 'admin') return next('/chat')
+    // 安全管理页仅普通用户；管理员在系统管理里改密
+    if (to.meta.userOnly && user.role === 'admin') return next('/admin')
+  } catch {
+    return next('/login')
   }
   next()
 })

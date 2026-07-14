@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from config import VECTOR_STORE_CONFIG, VECTOR_DIR
+from config import VECTOR_STORE_CONFIG, VECTOR_DIR, BASE_DIR
 from ollama_client import embed, embed_one, ollama_reachable
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,9 @@ class RAGParameterStore:
             "chunk_overlap": VECTOR_STORE_CONFIG.get("chunk_overlap", 120),
             "score_threshold": VECTOR_STORE_CONFIG.get("score_threshold", 0.15),
             "embedding_model": None,  # use config default
+            # fixed | sentence | paragraph | markdown | custom
+            "chunk_strategy": "sentence",
+            "chunk_separator": "",
         }
         self.load()
 
@@ -71,7 +74,7 @@ class RAGParameterStore:
     def update(self, updates: dict) -> dict:
         with self._lock:
             for k, v in updates.items():
-                if v is None:
+                if v is None and k not in ("chunk_separator", "embedding_model"):
                     continue
                 if k == "enabled":
                     self.params["enabled"] = bool(v)
@@ -81,19 +84,20 @@ class RAGParameterStore:
                     self.params[k] = float(v)
                 elif k == "embedding_model":
                     self.params[k] = v
+                elif k == "chunk_strategy":
+                    strategy = str(v or "sentence").strip().lower()
+                    allowed = {"fixed", "sentence", "paragraph", "markdown", "custom"}
+                    if strategy not in allowed:
+                        raise ValueError(f"chunk_strategy must be one of {sorted(allowed)}")
+                    self.params[k] = strategy
+                elif k == "chunk_separator":
+                    self.params[k] = str(v or "")
             self.save()
             return dict(self.params)
 
 
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
-    """Split text into overlapping chunks by characters (Chinese-friendly)."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if chunk_size <= 0:
-        return [text]
-    # Prefer splitting on paragraph/sentence boundaries when possible
-    parts = re.split(r"(?<=[。！？\n])", text)
+def _pack_parts(parts: list[str], chunk_size: int, overlap: int) -> list[str]:
+    """Merge small parts into size-bounded chunks with optional character overlap."""
     chunks: list[str] = []
     buf = ""
     for p in parts:
@@ -102,17 +106,18 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str
         if len(buf) + len(p) <= chunk_size:
             buf += p
         else:
-            if buf:
+            if buf.strip():
                 chunks.append(buf.strip())
             if len(p) > chunk_size:
                 start = 0
                 while start < len(p):
                     end = start + chunk_size
-                    chunks.append(p[start:end].strip())
-                    start = max(end - overlap, start + 1)
+                    piece = p[start:end].strip()
+                    if piece:
+                        chunks.append(piece)
+                    start = max(end - overlap, start + 1) if overlap > 0 else end
                 buf = ""
             else:
-                # keep overlap from previous
                 if chunks and overlap > 0:
                     prev = chunks[-1]
                     tail = prev[-overlap:] if len(prev) > overlap else prev
@@ -122,6 +127,74 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str
     if buf.strip():
         chunks.append(buf.strip())
     return [c for c in chunks if c]
+
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 800,
+    overlap: int = 120,
+    strategy: str = "sentence",
+    separator: str = "",
+) -> list[str]:
+    """
+    Split text for RAG indexing.
+
+    Strategies:
+      - fixed: pure sliding window by character count
+      - sentence: prefer 。！？ and newlines (default, Chinese-friendly)
+      - paragraph: split on blank lines first
+      - markdown: split on ATX headings (# ## ###)
+      - custom: split with user-provided regex separator
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if chunk_size <= 0:
+        return [text]
+
+    strategy = (strategy or "sentence").strip().lower()
+    if strategy == "fixed":
+        chunks: list[str] = []
+        start = 0
+        n = len(text)
+        while start < n:
+            end = min(start + chunk_size, n)
+            piece = text[start:end].strip()
+            if piece:
+                chunks.append(piece)
+            if end >= n:
+                break
+            start = max(end - overlap, start + 1) if overlap > 0 else end
+        return chunks
+
+    if strategy == "paragraph":
+        parts = re.split(r"\n\s*\n+", text)
+        # re-attach separator for readability
+        parts = [p.strip() + "\n\n" for p in parts if p.strip()]
+        return _pack_parts(parts, chunk_size, overlap)
+
+    if strategy == "markdown":
+        # Keep heading lines with following body until next heading
+        parts = re.split(r"(?=^#{1,6}\s+)", text, flags=re.MULTILINE)
+        parts = [p for p in parts if p and p.strip()]
+        return _pack_parts(parts, chunk_size, overlap)
+
+    if strategy == "custom":
+        sep = (separator or "").strip()
+        if not sep:
+            # fall back to sentence if custom regex empty
+            strategy = "sentence"
+        else:
+            try:
+                parts = re.split(sep, text)
+            except re.error:
+                parts = [text]
+            parts = [p for p in parts if p and p.strip()]
+            return _pack_parts(parts, chunk_size, overlap)
+
+    # sentence (default)
+    parts = re.split(r"(?<=[。！？\n])", text)
+    return _pack_parts(parts, chunk_size, overlap)
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -194,7 +267,13 @@ class VectorStore:
         params = rag_params.get()
         chunk_size = chunk_size or params.get("chunk_size", 800)
         chunk_overlap = chunk_overlap or params.get("chunk_overlap", 120)
-        pieces = chunk_text(content, chunk_size=chunk_size, overlap=chunk_overlap)
+        pieces = chunk_text(
+            content,
+            chunk_size=chunk_size,
+            overlap=chunk_overlap,
+            strategy=params.get("chunk_strategy") or "sentence",
+            separator=params.get("chunk_separator") or "",
+        )
         if not pieces:
             return {"status": "error", "message": "empty content after chunking"}
 
@@ -342,6 +421,16 @@ class VectorStore:
         return list(by_doc.values())
 
 
+def _display_path(path) -> str:
+    """Return path relative to project root when possible (portable for clones)."""
+    try:
+        p = Path(path).resolve()
+        root = Path(BASE_DIR).resolve()
+        return str(p.relative_to(root)).replace("\\", "/")
+    except Exception:
+        return str(path)
+
+
 def check_source_reachable(
     source_url: str = "",
     file_path: str = "",
@@ -426,7 +515,8 @@ def kb_status(probe_remote: bool = False) -> dict:
         "rag_enabled": params.get("enabled", True),
         "rag_params": params,
         "vector_store": {
-            "path": str(vector_store.directory),
+            # Prefer project-relative path so clones don't show machine-specific roots
+            "path": _display_path(vector_store.directory),
             "document_count": vector_store.doc_count,
             "chunk_count": vector_store.chunk_count,
             "usable": vector_store.chunk_count > 0 and ollama.get("ok", False),

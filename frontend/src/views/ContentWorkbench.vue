@@ -14,8 +14,11 @@
         </label>
         <label>
           关注标的代码
+          <span
+            class="help"
+            title="A 股六位交易所代码（如 600519），用于绑定生成内容与知识库标签。不是登录账号。"
+          >?</span>
           <input v-model="config.stockCode" placeholder="例: 600519" />
-          <span class="field-hint">A股六位代码，用于绑定生成内容与知识库标签</span>
         </label>
         <label>股票名称<input v-model="config.stockName" placeholder="贵州茅台" /></label>
         <label>模板
@@ -205,11 +208,19 @@ label {
   margin-bottom: 12px;
 }
 
-.field-hint {
-  display: block;
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-muted);
+.help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  border-radius: 50%;
+  border: 1px solid #ccc;
+  font-size: 10px;
+  color: #888;
+  cursor: help;
+  vertical-align: middle;
 }
 
 input,

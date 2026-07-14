@@ -76,15 +76,20 @@ class RAGRetriever:
             db.close()
 
     async def delete_document(self, doc_id: int) -> dict:
+        """Permanently remove a KB document from DB and vector index."""
         db = SessionLocal()
         try:
             doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
             if not doc:
                 return {"status": "error", "message": f"文档 {doc_id} 不存在"}
-            doc.status = "archived"
-            db.commit()
+            title = doc.title
             vector_store.delete_document(str(doc_id))
-            return {"status": "ok", "message": f"文档 {doc_id} 已归档"}
+            db.delete(doc)
+            db.commit()
+            return {"status": "ok", "message": f"文档 {doc_id}（{title}）已删除"}
+        except Exception as e:
+            db.rollback()
+            return {"status": "error", "message": str(e)}
         finally:
             db.close()
 

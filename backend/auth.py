@@ -36,13 +36,13 @@ def init_default_users() -> None:
             "username": AUTH_CONFIG["admin_username"],
             "password_hash": _hash_password(AUTH_CONFIG["admin_password"]),
             "role": "admin",
-            "display_name": "Administrator",
+            "display_name": "管理员",
         },
         AUTH_CONFIG["user_username"]: {
             "username": AUTH_CONFIG["user_username"],
             "password_hash": _hash_password(AUTH_CONFIG["user_password"]),
             "role": "user",
-            "display_name": "Analyst",
+            "display_name": "普通用户",
         },
     }
     logger.info("[Auth] Default users loaded: admin=%s user=%s",
@@ -56,6 +56,28 @@ def verify_password(username: str, password: str) -> Optional[dict]:
     if not hmac.compare_digest(user["password_hash"], _hash_password(password)):
         return None
     return {"username": user["username"], "role": user["role"], "display_name": user["display_name"]}
+
+
+def change_own_password(username: str, old_password: str, new_password: str) -> dict:
+    user = _USERS.get(username)
+    if not user:
+        raise ValueError("用户不存在")
+    if not hmac.compare_digest(user["password_hash"], _hash_password(old_password)):
+        raise ValueError("原密码错误")
+    if not new_password or len(new_password) < 6:
+        raise ValueError("新密码至少 6 位")
+    user["password_hash"] = _hash_password(new_password)
+    return {"username": username, "role": user["role"]}
+
+
+def admin_set_password(username: str, new_password: str) -> dict:
+    user = _USERS.get(username)
+    if not user:
+        raise ValueError("用户不存在")
+    if not new_password or len(new_password) < 6:
+        raise ValueError("新密码至少 6 位")
+    user["password_hash"] = _hash_password(new_password)
+    return {"username": username, "role": user["role"]}
 
 
 def create_token(username: str, role: str) -> str:
@@ -124,18 +146,23 @@ def list_users_safe() -> list[dict]:
     ]
 
 
-def create_user(username: str, password: str, role: str = "user") -> dict:
+def create_user(username: str, password: str, role: str = "user", display_name: str = "") -> dict:
     if role not in ("admin", "user"):
         raise ValueError("role must be admin or user")
     if username in _USERS:
         raise ValueError("username already exists")
+    if not password or len(password) < 6:
+        raise ValueError("密码至少 6 位")
+    label = (display_name or "").strip() or (
+        "管理员" if role == "admin" else "普通用户"
+    )
     _USERS[username] = {
         "username": username,
         "password_hash": _hash_password(password),
         "role": role,
-        "display_name": username,
+        "display_name": label,
     }
-    return {"username": username, "role": role}
+    return {"username": username, "role": role, "display_name": label}
 
 
 # Initialize on import

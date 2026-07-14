@@ -67,15 +67,8 @@
         </button>
         <div v-if="!collapsed" class="user-box">
           <div class="user-name">{{ user.display_name || user.username || '用户' }}</div>
-          <div class="user-role">
-            <span class="role-badge" :class="isAdmin ? 'admin' : 'user'">
-              {{ isAdmin ? '管理员' : '使用者' }}
-            </span>
-          </div>
-          <p class="role-hint">
-            {{ isAdmin ? '可管理知识库、RAG 参数与用户' : '可对话与生成内容，不可改知识库配置' }}
-          </p>
-          <button class="logout" type="button" @click="logout">退出</button>
+          <div class="user-account">{{ user.username || '' }}</div>
+          <button class="logout" type="button" @click="logout">退出登录</button>
         </div>
       </div>
     </aside>
@@ -109,16 +102,22 @@ const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
 const isLoginPage = computed(() => route.path === '/login')
 const isAdmin = computed(() => user.value?.role === 'admin')
 
-/** 使用者可见 */
-const userNav = [
-  { path: '/chat', label: '智能对话', short: '对话' },
-  { path: '/dashboard', label: '数据看板', short: '看板' },
-  { path: '/workbench', label: '内容工作台', short: '工作台' },
-  { path: '/multi-agent', label: '多智能体', short: '协同' },
-  { path: '/help', label: '帮助中心', short: '帮助' },
-]
+/** 使用区导航；普通用户额外提供「安全管理」改密入口 */
+const userNav = computed(() => {
+  const base = [
+    { path: '/chat', label: '智能对话', short: '对话' },
+    { path: '/dashboard', label: '数据看板', short: '看板' },
+    { path: '/workbench', label: '内容工作台', short: '工作台' },
+    { path: '/multi-agent', label: '多智能体', short: '协同' },
+    { path: '/help', label: '帮助中心', short: '帮助' },
+  ]
+  if (!isAdmin.value) {
+    base.push({ path: '/security', label: '安全管理', short: '安全' })
+  }
+  return base
+})
 
-/** 仅管理员：知识库与系统配置 */
+/** 仅管理员：知识库与系统配置（含改全部用户密码） */
 const adminNav = [
   { path: '/knowledge', label: '知识库管理', short: '库' },
   { path: '/rag', label: 'RAG 参数', short: 'RAG' },
@@ -228,10 +227,10 @@ watch(
 }
 
 .brand-name {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text);
-  line-height: 1.2;
+  line-height: 1.25;
 }
 
 .brand-model {
@@ -311,12 +310,13 @@ watch(
 }
 
 .nav-item {
-  padding: 10px 12px;
+  padding: 11px 12px;
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 14px;
+  font-size: 14.5px;
   display: block;
   text-align: left;
+  line-height: 1.35;
 }
 
 .sidebar.collapsed .nav-item {
@@ -344,7 +344,7 @@ watch(
 
 .side-bottom {
   border-top: 1px solid var(--border);
-  padding: 10px 12px 14px;
+  padding: 14px 14px 16px;
 }
 
 .collapse-btn {
@@ -352,8 +352,8 @@ watch(
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
-  margin-bottom: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
   width: 100%;
   text-align: left;
 }
@@ -363,47 +363,40 @@ watch(
 }
 
 .user-box {
-  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px 0;
 }
 
 .user-name {
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+  letter-spacing: -0.01em;
 }
 
-.user-role {
-  margin: 6px 0 4px;
-}
-
-.role-badge {
-  display: inline-block;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: #fff;
-  color: var(--text-secondary);
-}
-
-.role-badge.admin {
-  border-color: #111;
-  color: #111;
-  font-weight: 600;
-}
-
-.role-hint {
-  font-size: 11px;
+.user-account {
+  font-size: 13px;
   color: var(--text-muted);
-  line-height: 1.45;
-  margin-bottom: 10px;
+  line-height: 1.3;
 }
 
 .logout {
+  margin-top: 6px;
+  align-self: flex-start;
   border: 1px solid var(--border);
   background: #fff;
-  border-radius: 6px;
-  padding: 4px 10px;
+  border-radius: 8px;
+  padding: 7px 14px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.logout:hover {
+  background: var(--bg-hover);
 }
 
 .main {
@@ -424,8 +417,9 @@ watch(
 }
 
 .topbar-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 .sys {

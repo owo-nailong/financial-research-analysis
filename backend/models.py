@@ -11,7 +11,19 @@ class BaseResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     username: str
-    password: str
+    # Legacy plaintext is rejected by the API; only encrypted form is accepted.
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password_encrypted: str
+    new_password_encrypted: str
+
+
+class AdminSetPasswordRequest(BaseModel):
+    username: str
+    new_password_encrypted: str
 
 
 class FetchReportsRequest(BaseModel):
@@ -178,9 +190,15 @@ class RagParamsUpdate(BaseModel):
     chunk_overlap: Optional[int] = Field(default=None, ge=0, le=1000)
     score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     embedding_model: Optional[str] = None
+    # fixed | sentence | paragraph | markdown | custom
+    chunk_strategy: Optional[str] = None
+    # custom strategy: regex separator (e.g. \\n\\n+ or \\|\\|\\|)
+    chunk_separator: Optional[str] = None
 
 
 class CreateUserRequest(BaseModel):
     username: str
-    password: str
+    password: Optional[str] = None
+    password_encrypted: Optional[str] = None
     role: str = "user"
+    display_name: Optional[str] = None

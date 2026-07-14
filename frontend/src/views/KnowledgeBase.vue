@@ -211,7 +211,7 @@ async function load() {
     const raw = e?.message || String(e)
     if (/Network Error|ECONNREFUSED|Failed to fetch|timeout|Network/i.test(raw)) {
       msg.value =
-        '加载失败：连不上后端 (http://127.0.0.1:8010)。请双击项目根目录 start_all.bat 重新启动服务，然后刷新页面。'
+        '加载失败：连不上后端服务。请先启动后端（或运行项目根目录 start_all.bat），确认前端代理端口正确后刷新页面。'
     } else if (/401|Not authenticated|token/i.test(raw)) {
       msg.value = '登录已过期，请重新登录后再打开知识库。'
     } else {

@@ -42,23 +42,32 @@ api.interceptors.response.use(
   }
 )
 
-export const login = (username, password) => api.post('/auth/login', { username, password })
+export const getAuthPublicKey = () => api.get('/auth/public-key')
+/** Login with RSA-OAEP encrypted password only (no plaintext). */
+export const login = (username, passwordEncrypted) =>
+  api.post('/auth/login', { username, password_encrypted: passwordEncrypted })
 export const me = () => api.get('/auth/me')
 export const listUsers = () => api.get('/auth/users')
 export const createUser = (payload) => api.post('/auth/users', payload)
+export const changePassword = (payload) => api.post('/auth/change-password', payload)
+export const adminSetPassword = (payload) => api.post('/auth/admin/set-password', payload)
 
 export const healthCheck = () => api.get('/health')
 export const listTools = () => api.get('/tools')
 export const dashboardSummary = () => api.get('/dashboard/summary')
 export const dashboardKline = (stockCode = '600519', limit = 90) =>
   api.get('/dashboard/kline', { params: { stock_code: stockCode, limit } })
+export const dashboardStockSearch = (q, limit = 10) =>
+  api.get('/dashboard/stock-search', { params: { q, limit } })
 export const dashboardSync = (stockCode = '600519') =>
   api.post(`/dashboard/sync?stock_code=${encodeURIComponent(stockCode)}`)
 export const dataSources = () => api.get('/data/sources')
 
 export const submitFeedback = (payload) => api.post('/feedback', payload)
 export const multiAgentRun = (payload) => api.post('/agent/multi', payload, { timeout: 600000 })
-export const ingestReferences = (paths) => api.post('/admin/ingest-references', { paths })
+/** paths: optional list of project-relative paths; empty/omit uses README.md + docs/ */
+export const ingestReferences = (paths) =>
+  api.post('/admin/ingest-references', { paths: paths && paths.length ? paths : null })
 
 export const fetchReports = (params) => api.post('/fetch/reports', params)
 export const fetchNews = (params) => api.post('/fetch/news', params)

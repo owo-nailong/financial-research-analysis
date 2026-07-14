@@ -1,9 +1,27 @@
 <template>
   <div class="dash-page">
     <div class="toolbar">
-      <div class="field">
+      <div class="field search-field">
         <label>股票代码或名称</label>
-        <input v-model="stockCode" placeholder="600519" maxlength="10" @keydown.enter="reload" />
+        <input
+          v-model="query"
+          placeholder="代码或名称，如 600519 / 茅台"
+          maxlength="32"
+          @input="onQueryInput"
+          @keydown.enter.prevent="reload"
+          @focus="showSuggest = suggestions.length > 0"
+          @blur="onBlurSuggest"
+        />
+        <ul v-if="showSuggest && suggestions.length" class="suggest">
+          <li
+            v-for="s in suggestions"
+            :key="s.code"
+            @mousedown.prevent="pickSuggest(s)"
+          >
+            <strong>{{ s.name || '—' }}</strong>
+            <span class="code">{{ s.code }}</span>
+          </li>
+        </ul>
       </div>
       <div class="field">
         <label>周期</label>
@@ -129,10 +147,11 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { dashboardKline, dashboardSync } from '../api'
+import { dashboardKline, dashboardStockSearch, dashboardSync } from '../api'
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 const isAdmin = user.role === 'admin'
+const query = ref('600519')
 const stockCode = ref('600519')
 const stockName = ref('')
 const points = ref([])
@@ -141,6 +160,44 @@ const sourceUrl = ref('https://push2his.eastmoney.com/api/qt/stock/kline/get')
 const loading = ref(false)
 const syncing = ref(false)
 const msg = ref('')
+const suggestions = ref([])
+const showSuggest = ref(false)
+let searchTimer = null
+
+function onQueryInput() {
+  clearTimeout(searchTimer)
+  const q = query.value.trim()
+  if (!q) {
+    suggestions.value = []
+    showSuggest.value = false
+    return
+  }
+  searchTimer = setTimeout(async () => {
+    try {
+      const res = await dashboardStockSearch(q, 8)
+      suggestions.value = res.data || []
+      showSuggest.value = suggestions.value.length > 0
+    } catch (_) {
+      suggestions.value = []
+      showSuggest.value = false
+    }
+  }, 280)
+}
+
+function pickSuggest(s) {
+  query.value = `${s.name || ''} ${s.code}`.trim()
+  stockCode.value = s.code
+  stockName.value = s.name || ''
+  showSuggest.value = false
+  suggestions.value = []
+  reload()
+}
+
+function onBlurSuggest() {
+  setTimeout(() => {
+    showSuggest.value = false
+  }, 150)
+}
 
 const W = 900
 const H = 360
@@ -284,11 +341,14 @@ const xTicks = computed(() => {
 async function reload() {
   loading.value = true
   msg.value = ''
+  showSuggest.value = false
   try {
-    const res = await dashboardKline(stockCode.value.trim() || '600519', limit.value)
+    const q = query.value.trim() || stockCode.value.trim() || '600519'
+    const res = await dashboardKline(q, limit.value)
     if (res.status !== 'ok') {
       msg.value = res.message || 'K线获取失败'
       points.value = []
+      stockName.value = ''
       return
     }
     points.value = (res.data || []).map((p) => ({
@@ -299,8 +359,17 @@ async function reload() {
       low: Number(p.low ?? p.close),
       volume: Number(p.volume || 0),
     }))
-    stockName.value = res.stock_name || ''
+    stockCode.value = res.stock_code || stockCode.value
+    stockName.value = res.stock_name || stockName.value || ''
+    if (stockName.value && stockCode.value) {
+      query.value = `${stockName.value} ${stockCode.value}`
+    } else if (stockCode.value) {
+      query.value = stockCode.value
+    }
     sourceUrl.value = res.source_url || sourceUrl.value
+    if (!stockName.value) {
+      msg.value = '已加载行情，但未解析到股票名称（可尝试输入完整代码或中文名）'
+    }
   } catch (e) {
     msg.value = e.message
     points.value = []
@@ -313,7 +382,8 @@ async function syncLive() {
   syncing.value = true
   msg.value = ''
   try {
-    const res = await dashboardSync(stockCode.value.trim() || '600519')
+    const code = stockCode.value.trim() || '600519'
+    const res = await dashboardSync(code)
     msg.value = `同步完成：研报 ${res.reports?.total || 0} / 新闻 ${res.news?.total || 0} / 公告 ${res.announcements?.total || 0}`
     await reload()
   } catch (e) {
@@ -360,6 +430,49 @@ onMounted(reload)
   padding: 8px 10px;
   min-width: 120px;
   background: #fff;
+}
+
+.search-field {
+  position: relative;
+}
+
+.search-field input {
+  min-width: 220px;
+}
+
+.suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.suggest li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.suggest li:hover {
+  background: #f5f5f5;
+}
+
+.suggest .code {
+  color: var(--text-muted);
+  font-family: ui-monospace, Consolas, monospace;
 }
 
 .btn {

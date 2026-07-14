@@ -24,7 +24,10 @@
             <div class="stock-field">
               <label class="stock-label">
                 关注标的代码
-                <span class="help" title="填写 A 股六位代码可缩小分析范围，例如 600519=贵州茅台、300750=宁德时代。不填则按问题全文理解。">?</span>
+                <span
+                  class="help"
+                  title="「关注标的代码」指股票的交易所代码（不是用户账号）。填了之后，快捷分析与工具会优先查该股票的研报、评级与情绪；不填也可以直接用自然语言提问。例：600519=贵州茅台。"
+                >?</span>
               </label>
               <input
                 v-model="stockCode"
@@ -34,9 +37,6 @@
               />
             </div>
           </div>
-          <p class="tool-hint">
-            「关注标的代码」指股票的交易所代码（不是用户账号）。填了之后，快捷分析与工具会优先查该股票的研报、评级与情绪；不填也可以直接用自然语言提问。
-          </p>
           <div class="suggestions">
             <button
               v-for="s in suggestions"
@@ -108,7 +108,10 @@
         <div class="stock-field">
           <label class="stock-label">
             关注标的代码
-            <span class="help" title="A 股六位代码，如 600519。用于限定研报/评级/情绪分析范围。">?</span>
+            <span
+              class="help"
+              title="「关注标的代码」指股票的交易所代码（不是用户账号）。填了之后，快捷分析与工具会优先查该股票的研报、评级与情绪；不填也可以直接用自然语言提问。"
+            >?</span>
           </label>
           <input v-model="stockCode" class="stock" placeholder="例: 600519" maxlength="10" />
         </div>
@@ -356,17 +359,6 @@ async function runQuick() {
   padding: 6px 10px;
   font-size: 12px;
   width: 110px;
-}
-
-.tool-hint {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  text-align: center;
-  max-width: 640px;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 .ghost {

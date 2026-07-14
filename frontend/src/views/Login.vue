@@ -13,35 +13,51 @@
           <input v-model="password" type="password" autocomplete="current-password" required />
         </label>
         <p v-if="error" class="error">{{ error }}</p>
-        <button type="submit" :disabled="loading">{{ loading ? '登录中...' : '登录' }}</button>
+        <p class="secure-tip">密码经 RSA-OAEP 加密后传输，不以明文提交</p>
+        <button type="submit" :disabled="loading || !keyReady">
+          {{ loading ? '登录中...' : keyReady ? '登录' : '准备加密通道...' }}
+        </button>
       </form>
-      <div class="tips">
-        <div>管理员: admin / admin123</div>
-        <div>使用者: user / user123</div>
-      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { login } from '../api'
+import { getAuthPublicKey, login } from '../api'
+import { encryptPassword, loadPublicKey } from '../utils/crypto'
 
 const router = useRouter()
 const route = useRoute()
-const username = ref('admin')
-const password = ref('admin123')
+const username = ref('')
+const password = ref('')
 const loading = ref(false)
 const error = ref('')
+const keyReady = ref(false)
+
+onMounted(async () => {
+  try {
+    await loadPublicKey(getAuthPublicKey)
+    keyReady.value = true
+  } catch (e) {
+    error.value = e.message || '无法获取加密公钥'
+  }
+})
 
 async function onSubmit() {
   loading.value = true
   error.value = ''
   try {
-    const res = await login(username.value, password.value)
+    if (!keyReady.value) {
+      await loadPublicKey(getAuthPublicKey)
+      keyReady.value = true
+    }
+    const passwordEncrypted = await encryptPassword(password.value)
+    const res = await login(username.value.trim(), passwordEncrypted)
     localStorage.setItem('token', res.token)
     localStorage.setItem('user', JSON.stringify(res.user))
+    password.value = ''
     router.replace(route.query.redirect || '/chat')
   } catch (e) {
     error.value = e.message || '登录失败'
@@ -121,11 +137,10 @@ button:disabled {
   margin-bottom: 8px;
 }
 
-.tips {
-  margin-top: 18px;
-  font-size: 12px;
+.secure-tip {
+  font-size: 11px;
   color: var(--text-muted);
-  line-height: 1.7;
+  margin: 0 0 4px;
   text-align: center;
 }
 </style>
