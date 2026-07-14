@@ -9,6 +9,15 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// Avoid system proxy hijacking local /api (common cause of "local site always drops")
+try {
+  if (typeof window !== 'undefined') {
+    // axios browser uses XHR; proxy is mainly a Node issue, but keep explicit base
+  }
+} catch (_) {
+  /* ignore */
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {

@@ -342,8 +342,18 @@ class VectorStore:
         return list(by_doc.values())
 
 
-def check_source_reachable(source_url: str = "", file_path: str = "") -> dict:
-    """Check whether a knowledge source is reachable (URL or local file)."""
+def check_source_reachable(
+    source_url: str = "",
+    file_path: str = "",
+    *,
+    probe_remote: bool = False,
+    remote_timeout: float = 1.5,
+) -> dict:
+    """Check whether a knowledge source is reachable (URL or local file).
+
+    Remote HTTP probes are opt-in. Probing every URL on each status call can
+    block the API for minutes and freeze the whole backend event loop.
+    """
     result = {
         "source_url": source_url or "",
         "file_path": file_path or "",
@@ -366,27 +376,49 @@ def check_source_reachable(source_url: str = "", file_path: str = "") -> dict:
             result["reachable"] = True
             result["detail"] = "internal seed source"
             return result
+        if source_url.startswith("workbench://") or source_url.startswith("import://"):
+            result["reachable"] = True
+            result["detail"] = "local import source"
+            return result
+        if not probe_remote:
+            # Fast path: do not open network sockets on status page load
+            result["reachable"] = True
+            result["detail"] = "remote URL (not probed)"
+            return result
         try:
             import requests
-            resp = requests.head(source_url, timeout=5, allow_redirects=True)
+            resp = requests.head(
+                source_url, timeout=remote_timeout, allow_redirects=True
+            )
             if resp.status_code >= 400:
-                resp = requests.get(source_url, timeout=5, stream=True)
+                resp = requests.get(
+                    source_url, timeout=remote_timeout, stream=True
+                )
             result["reachable"] = resp.status_code < 500
             result["detail"] = f"HTTP {resp.status_code}"
         except Exception as e:
-            result["detail"] = str(e)
+            result["reachable"] = False
+            result["detail"] = str(e)[:200]
         return result
     result["detail"] = "no source"
     return result
 
 
-def kb_status() -> dict:
-    """Overall knowledge base + RAG health."""
+def kb_status(probe_remote: bool = False) -> dict:
+    """Overall knowledge base + RAG health.
+
+    By default only does local/file/seed checks so /api/kb/status stays fast
+    and does not block other API traffic.
+    """
     ollama = ollama_reachable()
     sources = vector_store.list_sources()
     source_checks = []
     for s in sources:
-        chk = check_source_reachable(s.get("source_url", ""), s.get("file_path", ""))
+        chk = check_source_reachable(
+            s.get("source_url", ""),
+            s.get("file_path", ""),
+            probe_remote=probe_remote,
+        )
         source_checks.append({**s, **chk})
     params = rag_params.get()
     return {
@@ -406,6 +438,7 @@ def kb_status() -> dict:
             "error": ollama.get("error"),
         },
         "sources": source_checks,
+        "probe_remote": probe_remote,
     }
 
 

@@ -26,6 +26,9 @@
       <span class="count">共 {{ total }} 篇</span>
     </div>
 
+    <p v-if="msg" class="msg err-banner">{{ msg }}</p>
+    <p v-if="loading" class="msg">正在加载知识库...</p>
+
     <div class="table-wrap">
       <table>
         <thead>
@@ -168,7 +171,11 @@ function formatDate(v) {
   return String(v).replace('T', ' ').slice(0, 19)
 }
 
+const loading = ref(false)
+
 async function load() {
+  loading.value = true
+  msg.value = ''
   try {
     if (searchQuery.value.trim()) {
       const res = await searchKB({
@@ -201,7 +208,19 @@ async function load() {
       total.value = res.total || 0
     }
   } catch (e) {
-    msg.value = e.message
+    const raw = e?.message || String(e)
+    if (/Network Error|ECONNREFUSED|Failed to fetch|timeout|Network/i.test(raw)) {
+      msg.value =
+        '加载失败：连不上后端 (http://127.0.0.1:8010)。请双击项目根目录 start_all.bat 重新启动服务，然后刷新页面。'
+    } else if (/401|Not authenticated|token/i.test(raw)) {
+      msg.value = '登录已过期，请重新登录后再打开知识库。'
+    } else {
+      msg.value = '加载失败：' + raw
+    }
+    documents.value = []
+    total.value = 0
+  } finally {
+    loading.value = false
   }
 }
 
@@ -537,6 +556,17 @@ tr:hover td {
   margin-top: 10px;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.err-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: #fff5f5;
+  border: 1px solid #f0c0c0;
+  border-radius: 8px;
+  color: #a33;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .meta {

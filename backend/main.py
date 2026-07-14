@@ -333,8 +333,16 @@ async def kb_list(
 
 
 @app.get("/api/kb/status", tags=["知识库管理"])
-async def knowledge_status(user: dict = Depends(require_user)):
-    return kb_status()
+async def knowledge_status(
+    probe_remote: bool = Query(
+        False,
+        description="是否探测远程 URL 可达性（默认关闭，避免阻塞整个 API）",
+    ),
+    user: dict = Depends(require_user),
+):
+    # Run in thread so any residual blocking I/O cannot freeze the event loop
+    import asyncio
+    return await asyncio.to_thread(kb_status, probe_remote)
 
 
 @app.get("/api/kb/{doc_id}", tags=["知识库管理"])

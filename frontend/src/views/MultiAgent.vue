@@ -17,10 +17,10 @@
         问题
         <textarea v-model="question" rows="4" placeholder="例如：综合分析贵州茅台当前投资价值与主要风险" />
       </label>
-      <label class="check">
-        <input type="checkbox" v-model="useRag" />
-        使用知识库检索作为参考资料
-      </label>
+      <div class="check-row">
+        <input id="use-rag" type="checkbox" v-model="useRag" class="check-input" />
+        <label for="use-rag" class="check-label">使用知识库检索作为参考资料</label>
+      </div>
       <button type="button" class="btn primary" :disabled="loading || !question.trim()" @click="run">
         {{ loading ? '多智能体运行中...' : '开始协调分析' }}
       </button>
@@ -122,7 +122,8 @@ async function run() {
   margin-bottom: 12px;
 }
 
-.form input,
+.form input[type='text'],
+.form input:not([type]),
 .form textarea {
   display: block;
   width: 100%;
@@ -131,12 +132,38 @@ async function run() {
   border-radius: 8px;
   padding: 8px 10px;
   font: inherit;
+  box-sizing: border-box;
 }
 
-.check {
-  display: flex !important;
+.check-row {
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  margin: 14px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafafa;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.check-input {
+  width: 16px !important;
+  height: 16px !important;
+  margin: 0 !important;
+  flex-shrink: 0;
+  accent-color: #111;
+  cursor: pointer;
+}
+
+.check-label {
+  margin: 0 !important;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: normal;
 }
 
 .btn {

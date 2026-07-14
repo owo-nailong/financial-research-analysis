@@ -337,11 +337,38 @@ def _templates() -> list[dict]:
 
 
 def seed_all(force: bool = False, index_rag: bool = True) -> dict:
-    """Insert seed data if tables empty (or force=True). Optionally index into RAG."""
+    """
+    Insert seed data if tables empty (or force=True). Optionally index into RAG.
+
+    By default SKIP fake multi-source seed (prefer live URL crawl).
+    Set ENABLE_SEED_DATA=true to allow demo seed rows.
+    Templates still seed when empty (needed by workbench).
+    """
+    import os
+    allow_fake = force or os.getenv("ENABLE_SEED_DATA", "false").lower() in ("true", "1", "yes")
     init_db()
     db = SessionLocal()
-    stats = {"reports": 0, "news": 0, "announcements": 0, "social": 0, "templates": 0, "kb": 0, "rag_chunks": 0}
+    stats = {"reports": 0, "news": 0, "announcements": 0, "social": 0, "templates": 0, "kb": 0, "rag_chunks": 0, "fake_seed": allow_fake}
     try:
+        # always ensure content templates exist
+        if db.query(ContentTemplate).count() == 0:
+            for item in _templates():
+                db.add(ContentTemplate(**item))
+                stats["templates"] += 1
+            db.commit()
+
+        if not allow_fake:
+            stats["ok"] = True
+            stats["message"] = "skipped fake seed; use live crawl / admin purge-seed rebuild"
+            stats["counts"] = {
+                "reports": db.query(ResearchReport).count(),
+                "news": db.query(FinancialNews).count(),
+                "announcements": db.query(CompanyAnnouncement).count(),
+                "social": db.query(SocialSentiment).count(),
+                "kb": db.query(KnowledgeDocument).filter(KnowledgeDocument.status == "active").count(),
+                "vector_chunks": vector_store.chunk_count,
+            }
+            return stats
         if force or db.query(ResearchReport).count() == 0:
             if force:
                 db.query(ResearchReport).delete()

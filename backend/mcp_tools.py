@@ -18,6 +18,10 @@ from database import (
 )
 from ollama_client import chat as ollama_chat
 from rag_store import vector_store, rag_params, kb_status
+from data_fetcher import (
+    fetch_research_reports_live, fetch_financial_news_live,
+    fetch_announcements_live, fetch_social_live, fetch_kline, source_catalog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +133,25 @@ class MCPToolHandler:
             data = json.loads(cached)
             return {"status": "ok", "source": "cache", "total": len(data), "data": data}
 
+        # 1) live crawl (东方财富研报)
+        live_rows = fetch_research_reports_live(
+            stock_code=params.get("stock_code") or "",
+            limit=params.get("limit", 20),
+        )
         db = SessionLocal()
         try:
+            if live_rows:
+                for item in live_rows:
+                    exists = db.query(ResearchReport).filter(
+                        ResearchReport.title == item["title"],
+                        ResearchReport.institution == item["institution"],
+                        ResearchReport.report_date == item["report_date"],
+                    ).first()
+                    if exists:
+                        continue
+                    db.add(ResearchReport(**item))
+                db.commit()
+
             query = db.query(ResearchReport)
             if params.get("stock_code"):
                 query = query.filter(ResearchReport.stock_code == params["stock_code"])
@@ -154,7 +175,14 @@ class MCPToolHandler:
             } for r in reports]
             if data:
                 await cache.set(key, data, CACHE_CONFIG["report_ttl"])
-            return {"status": "ok", "source": "database", "total": len(data), "data": data}
+            return {
+                "status": "ok",
+                "source": "live+database" if live_rows else "database",
+                "live_fetched": len(live_rows),
+                "total": len(data),
+                "data": data,
+                "source_catalog": source_catalog(),
+            }
         finally:
             db.close()
 
@@ -166,14 +194,26 @@ class MCPToolHandler:
             data = json.loads(cached)
             return {"status": "ok", "source": "cache", "total": len(data), "data": data}
 
+        live_rows = fetch_financial_news_live(
+            keyword=params.get("keyword") or "",
+            stock_code=params.get("stock_code") or "",
+            limit=params.get("limit", 20),
+        )
         db = SessionLocal()
         try:
+            if live_rows:
+                for item in live_rows:
+                    exists = db.query(FinancialNews).filter(FinancialNews.title == item["title"]).first()
+                    if exists:
+                        continue
+                    db.add(FinancialNews(**item))
+                db.commit()
+
             query = db.query(FinancialNews)
             if params.get("keyword"):
                 kw = f"%{params['keyword']}%"
                 query = query.filter((FinancialNews.title.like(kw)) | (FinancialNews.content.like(kw)))
             if params.get("stock_code"):
-                # JSON contains is dialect-dependent; use LIKE on serialized form
                 query = query.filter(FinancialNews.related_stocks.like(f"%{params['stock_code']}%"))
             if params.get("sentiment"):
                 query = query.filter(FinancialNews.sentiment_label == params["sentiment"])
@@ -189,13 +229,35 @@ class MCPToolHandler:
                 "sentiment_label": n.sentiment_label, "sentiment_score": n.sentiment_score,
             } for n in news_list]
             await cache.set(key, data, CACHE_CONFIG["news_ttl"])
-            return {"status": "ok", "source": "database", "total": len(data), "data": data}
+            return {
+                "status": "ok",
+                "source": "live+database" if live_rows else "database",
+                "live_fetched": len(live_rows),
+                "total": len(data),
+                "data": data,
+            }
         finally:
             db.close()
 
     async def fetch_company_announcements(self, params: dict) -> dict:
+        stock_code = params.get("stock_code") or ""
+        live_rows = fetch_announcements_live(stock_code, limit=params.get("limit", 20)) if stock_code else []
         db = SessionLocal()
         try:
+            if live_rows:
+                for item in live_rows:
+                    # strip non-model fields
+                    row = {k: v for k, v in item.items() if k != "source_url"}
+                    exists = db.query(CompanyAnnouncement).filter(
+                        CompanyAnnouncement.stock_code == row["stock_code"],
+                        CompanyAnnouncement.title == row["title"],
+                        CompanyAnnouncement.announce_date == row["announce_date"],
+                    ).first()
+                    if exists:
+                        continue
+                    db.add(CompanyAnnouncement(**row))
+                db.commit()
+
             query = db.query(CompanyAnnouncement)
             if params.get("stock_code"):
                 query = query.filter(CompanyAnnouncement.stock_code == params["stock_code"])
@@ -213,13 +275,32 @@ class MCPToolHandler:
                 "announce_date": str(a.announce_date), "announce_type": a.announce_type,
                 "summary": a.summary, "key_points": a.key_points, "content": (a.content or "")[:2000],
             } for a in rows]
-            return {"status": "ok", "source": "database", "total": len(data), "data": data}
+            return {
+                "status": "ok",
+                "source": "live+database" if live_rows else "database",
+                "live_fetched": len(live_rows),
+                "total": len(data),
+                "data": data,
+            }
         finally:
             db.close()
 
     async def fetch_social_sentiment(self, params: dict) -> dict:
+        stock_code = params.get("stock_code") or ""
+        live_rows = fetch_social_live(stock_code, limit=params.get("limit", 50)) if stock_code else []
         db = SessionLocal()
         try:
+            if live_rows:
+                for item in live_rows:
+                    exists = db.query(SocialSentiment).filter(
+                        SocialSentiment.stock_code == item.get("stock_code"),
+                        SocialSentiment.content == item.get("content"),
+                    ).first()
+                    if exists:
+                        continue
+                    db.add(SocialSentiment(**item))
+                db.commit()
+
             query = db.query(SocialSentiment)
             if params.get("stock_code"):
                 query = query.filter(SocialSentiment.stock_code == params["stock_code"])
@@ -243,7 +324,14 @@ class MCPToolHandler:
                     "sentiment_score": p.sentiment_score, "hot_index": p.hot_index,
                     "stock_code": p.stock_code, "stock_name": p.stock_name,
                 })
-            return {"status": "ok", "total": len(post_list), "sentiment_stats": stats, "data": post_list}
+            return {
+                "status": "ok",
+                "source": "live+database" if live_rows else "database",
+                "live_fetched": len(live_rows),
+                "total": len(post_list),
+                "sentiment_stats": stats,
+                "data": post_list,
+            }
         finally:
             db.close()
 
