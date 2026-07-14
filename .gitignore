@@ -14,3 +14,8 @@ mcps/
 *.log
 .DS_Store
 Thumbs.db
+
+# local screenshots / debug artifacts
+ui_*.png
+screenshots/
+
