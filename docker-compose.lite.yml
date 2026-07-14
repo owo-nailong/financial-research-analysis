@@ -1,0 +1,63 @@
+# 精简模式：无需 MySQL / Ollama（SQLite + 无本地大模型）
+# 适合快速打开界面体验；智能对话能力会受限。
+# 用法: docker compose -f docker-compose.lite.yml up -d --build
+
+name: financial-research-lite
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: fras-lite-redis
+    restart: unless-stopped
+    networks:
+      - fras-lite
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: fras-lite-backend
+    restart: unless-stopped
+    environment:
+      USE_SQLITE: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OLLAMA_BASE_URL: http://127.0.0.1:11434
+      LLM_PROVIDER: ollama
+      JWT_SECRET: lite-demo-secret
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8000
+      DEBUG: "false"
+    volumes:
+      - lite_data:/app/data
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+    networks:
+      - fras-lite
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fras-lite-frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - fras-lite
+
+volumes:
+  lite_data:
+
+networks:
+  fras-lite:
+    driver: bridge

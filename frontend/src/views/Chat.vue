@@ -72,10 +72,16 @@
               </details>
             </div>
             <div class="markdown-body" v-html="renderMd(m.content)" />
-            <div v-if="m.sources?.length" class="sources">
+            <div v-if="displaySources(m.sources).length" class="sources">
               <span class="src-label">来源</span>
-              <span v-for="(s, si) in m.sources.slice(0, 8)" :key="si" class="src-tag">
-                {{ s.tool || s.title || 'ref' }}
+              <span
+                v-for="(s, si) in displaySources(m.sources)"
+                :key="si"
+                class="src-tag"
+                :class="s.kind"
+                :title="s.hint || s.label"
+              >
+                {{ s.label }}
               </span>
             </div>
           </div>
@@ -152,6 +158,34 @@ const suggestions = [
 
 function renderMd(text) {
   return marked.parse(text || '', { breaks: true })
+}
+
+/** 用来源标题展示，避免一堆重复的 "rag" 标签 */
+function displaySources(list) {
+  if (!Array.isArray(list) || !list.length) return []
+  const seen = new Set()
+  const out = []
+  for (const s of list) {
+    const title = (s?.title || '').trim()
+    const tool = (s?.tool || '').trim()
+    // 文档类：优先标题；工具类：用中文名/title
+    let label = title
+    if (!label || label.toLowerCase() === 'rag' || label === 'search_knowledge_base') {
+      if (tool === 'rag' || tool === 'search_knowledge_base') continue
+      label = title || tool || ''
+    }
+    if (!label || label.toLowerCase() === 'rag') continue
+    const key = label.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      label: label.length > 28 ? label.slice(0, 26) + '…' : label,
+      kind: s.kind === 'document' || tool === 'rag' ? 'doc' : 'tool',
+      hint: [title, s.source_url, tool].filter(Boolean).join(' · '),
+    })
+    if (out.length >= 8) break
+  }
+  return out
 }
 
 async function scrollBottom() {
@@ -464,5 +498,17 @@ async function runQuick() {
   border-radius: 999px;
   padding: 2px 8px;
   color: var(--text-secondary);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.src-tag.doc {
+  background: #f7f7f8;
+}
+
+.src-tag.tool {
+  background: #fff;
 }
 </style>

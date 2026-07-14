@@ -706,14 +706,24 @@ async def ingest_references(
     agent: FinancialAnalysisAgent = Depends(get_financial_agent),
 ):
     """
-    Ingest reference docs into KB.
+    将文档资料写入知识库并建立向量索引。
 
-    Paths are portable: relative paths resolve against project root
-    (e.g. README.md, docs/sample.md). Absolute paths still accepted if present.
-    Default: project README + optional docs/ folder text files.
+    - 未指定 paths 时：默认扫描项目 data/ 目录下可导入的业务文件
+      （跳过 vector_store、数据库、向量矩阵等运行时文件）
+    - 指定 paths 时：支持相对项目根的路径或绝对路径
     """
     from pathlib import Path as P
-    from config import BASE_DIR
+    from config import BASE_DIR, DATA_DIR
+
+    TEXT_SUFFIX = {".md", ".txt", ".csv", ".sql", ".py"}
+    # 业务侧 json 可导入；运行时配置文件名见 SKIP_NAMES
+    EXTRA_SUFFIX = {".json", ".pdf"}
+    SKIP_DIR_NAMES = {"vector_store", "__pycache__", ".git"}
+    SKIP_SUFFIX = {".db", ".npy", ".pyc", ".log", ".lock"}
+    SKIP_NAMES = {
+        "chunks.json", "embeddings.npy", "rag_params.json",
+        "feedback.jsonl", ".gitkeep",
+    }
 
     def _resolve(p: str) -> P:
         fp = P(p)
@@ -721,15 +731,38 @@ async def ingest_references(
             fp = (BASE_DIR / fp).resolve()
         return fp
 
-    # Portable defaults — no machine-specific absolute paths
-    default_paths: list[str] = ["README.md"]
-    docs_dir = BASE_DIR / "docs"
-    if docs_dir.is_dir():
-        for f in sorted(docs_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in (".md", ".txt", ".py", ".json", ".sql", ".csv"):
-                default_paths.append(str(P("docs") / f.name))
+    def _collect_data_files() -> list[str]:
+        """Collect importable files under data/ (relative to project root)."""
+        root = P(DATA_DIR).resolve()
+        if not root.is_dir():
+            return []
+        found: list[str] = []
+        for fp in sorted(root.rglob("*")):
+            if not fp.is_file():
+                continue
+            # skip runtime / system dirs
+            try:
+                rel_parts = fp.relative_to(root).parts
+            except ValueError:
+                continue
+            if any(part in SKIP_DIR_NAMES for part in rel_parts):
+                continue
+            name = fp.name
+            if name in SKIP_NAMES or name.startswith("."):
+                continue
+            suf = fp.suffix.lower()
+            if suf in SKIP_SUFFIX:
+                continue
+            if suf not in TEXT_SUFFIX and suf not in EXTRA_SUFFIX:
+                continue
+            try:
+                rel = str(fp.relative_to(BASE_DIR.resolve())).replace("\\", "/")
+            except ValueError:
+                rel = str(fp)
+            found.append(rel)
+        return found
 
-    paths = req.paths or default_paths
+    paths = req.paths if req.paths else _collect_data_files()
     indexed = []
     errors = []
     for p in paths:
@@ -739,41 +772,44 @@ async def ingest_references(
         except ValueError:
             rel = fp.name
         if not fp.exists() or not fp.is_file():
-            errors.append({"path": p, "error": "not found"})
+            errors.append({"path": p, "error": "文件不存在"})
             continue
         try:
-            if fp.suffix.lower() in (".md", ".txt", ".py", ".json", ".sql", ".csv"):
+            suf = fp.suffix.lower()
+            if suf in TEXT_SUFFIX or suf == ".json":
                 text = fp.read_text(encoding="utf-8", errors="replace")
-            elif fp.suffix.lower() == ".pdf":
+            elif suf == ".pdf":
                 try:
                     import PyPDF2
                     reader = PyPDF2.PdfReader(str(fp))
                     parts = []
-                    for i, page in enumerate(reader.pages[:25]):
+                    for page in reader.pages[:25]:
                         try:
                             parts.append(page.extract_text() or "")
                         except Exception:
                             pass
                     text = "\n".join(parts)
                     if not text.strip():
-                        errors.append({"path": p, "error": "pdf no extractable text"})
+                        errors.append({"path": p, "error": "PDF 无可提取文本"})
                         continue
                 except Exception as e:
-                    errors.append({"path": p, "error": f"pdf: {e}"})
+                    errors.append({"path": p, "error": f"PDF 解析失败: {e}"})
                     continue
             else:
-                errors.append({"path": p, "error": f"unsupported type {fp.suffix}"})
+                errors.append({"path": p, "error": f"不支持的文件类型 {suf or '(无扩展名)'}"})
+                continue
+            if not (text or "").strip():
+                errors.append({"path": p, "error": "空文件"})
                 continue
             chunks = [text[i:i + 6000] for i in range(0, min(len(text), 60000), 5500)]
             for idx, chunk in enumerate(chunks):
                 title = fp.name if idx == 0 else f"{fp.name}#{idx + 1}"
-                # Store portable relative reference, not absolute local path
-                source = f"project://{rel}"
+                source = f"data://{rel}" if rel.startswith("data/") else f"kb://{rel}"
                 res = await agent.add_to_kb(
                     title=title,
                     content=chunk,
-                    doc_type="参考资料",
-                    tags=["reference", fp.suffix.lstrip(".")],
+                    doc_type="资料文档",
+                    tags=["data_import", suf.lstrip(".") or "bin"],
                     related_stocks=[],
                     source_url=source,
                     file_path=rel,
@@ -784,9 +820,10 @@ async def ingest_references(
     return {
         "status": "ok",
         "indexed_count": sum(1 for x in indexed if x.get("status") == "ok"),
+        "scanned_files": len(paths),
         "indexed": indexed[:50],
         "errors": errors,
-        "defaults": default_paths,
+        "source_root": "data/",
     }
 
 

@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h1>系统管理</h1>
-        <p class="lead">查看运行状态、管理账号与密码。密码均经 RSA-OAEP 加密传输。</p>
+        <p class="lead">运行状态监控、用户权限与账号安全配置。</p>
       </div>
       <button type="button" class="btn" :disabled="loading" @click="refreshAll">
         {{ loading ? '刷新中...' : '刷新状态' }}
@@ -39,8 +39,8 @@
       <section class="panel users-panel">
         <div class="panel-head">
           <div>
-            <h2>用户与密码</h2>
-            <p class="panel-desc">可修改任意账号密码（含管理员自己），或创建新用户。</p>
+            <h2>用户管理</h2>
+            <p class="panel-desc">管理系统账号：创建用户、调整角色、重置密码。</p>
           </div>
         </div>
 
@@ -125,20 +125,21 @@
         </section>
 
         <section class="panel">
-          <h2>维护操作</h2>
+          <h2>数据维护</h2>
           <p class="panel-desc">
-            数据与向量索引保存在项目目录下的 <code>data/</code>，克隆仓库后按 README 配置即可，无需本机绝对路径。
+            对知识库资料与演示数据执行维护操作。业务文件默认存放于系统数据目录。
           </p>
           <div class="actions-stack">
-            <button type="button" class="btn block" :disabled="working" @click="reseed">
-              {{ working ? '处理中...' : '重新注入种子数据' }}
-            </button>
             <button type="button" class="btn block" :disabled="working" @click="ingestDocs">
-              导入项目文档到知识库
+              {{ working ? '处理中...' : '导入数据目录至知识库' }}
+            </button>
+            <button type="button" class="btn block" :disabled="working" @click="reseed">
+              {{ working ? '处理中...' : '重建演示数据集' }}
             </button>
           </div>
           <p class="hint">
-            导入默认读取仓库内 <code>README.md</code> 与可选 <code>docs/</code> 目录，不依赖本机固定路径。
+            「导入数据目录」将扫描 data 下可识别的文档（文本 / Markdown / CSV / PDF 等），
+            自动跳过向量索引、数据库等运行时文件，并写入知识库供 RAG 检索。
           </p>
         </section>
       </aside>
@@ -308,7 +309,7 @@ async function ingestDocs() {
     const res = await ingestReferences([])
     const n = res.indexed_count ?? 0
     const errN = (res.errors || []).length
-    setMsg(`已导入项目文档 ${n} 条` + (errN ? `，${errN} 个文件跳过` : ''))
+    setMsg(`知识库导入完成：成功 ${n} 条` + (errN ? `，跳过 ${errN} 项` : ''))
     await loadHealth()
   } catch (e) {
     setMsg(e.message, true)

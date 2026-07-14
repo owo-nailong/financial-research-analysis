@@ -149,12 +149,32 @@ class FinancialAnalysisAgent:
             tools.append(("extract_profit_forecast", {"stock_code": code or "600519"}))
 
         if not tools:
-            # default: RAG QA path + ratings if stock known
+            # default tools when intent unclear (RAG is applied separately in chat)
             if code:
                 tools.append(("extract_investment_ratings", {"stock_code": code}))
                 tools.append(("aggregate_market_sentiment", {"stock_code": code, "stock_name": name, "days": 30}))
-            tools.append(("search_knowledge_base", {"query": q, "top_k": rag_params.get().get("top_k", 5)}))
         return tools[:4]
+
+    @staticmethod
+    def _dedupe_sources(items: list[dict]) -> list[dict]:
+        """Keep unique sources by title/url/tool; prefer human-readable labels."""
+        seen = set()
+        out = []
+        for s in items:
+            if not s:
+                continue
+            title = (s.get("title") or "").strip()
+            url = (s.get("source_url") or "").strip()
+            tool = (s.get("tool") or "").strip()
+            # skip pure internal RAG tool marker without document title
+            if tool in ("rag", "search_knowledge_base") and not title and not url:
+                continue
+            key = (title or url or tool).lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
 
     async def chat(self, question: str, session_id: str = "default",
                    stock_code: str = None, use_rag: bool = True) -> dict:
@@ -164,6 +184,24 @@ class FinancialAnalysisAgent:
         tool_results = []
 
         selected = self._pick_tools(question, stock_code)
+        # When dedicated RAG is on, do not also call search_knowledge_base (avoids double + duplicate tags)
+        if use_rag:
+            selected = [(n, p) for n, p in selected if n != "search_knowledge_base"]
+
+        TOOL_LABELS = {
+            "aggregate_market_sentiment": "市场情绪",
+            "fetch_social_sentiment": "社交舆情",
+            "compare_opinions": "观点对比",
+            "extract_investment_ratings": "投资评级",
+            "extract_financial_data": "财务数据",
+            "extract_risk_warnings": "风险提示",
+            "fetch_research_reports": "研报",
+            "fetch_financial_news": "财经新闻",
+            "fetch_company_announcements": "公司公告",
+            "extract_profit_forecast": "盈利预测",
+            "search_knowledge_base": "知识库",
+        }
+
         for tool_name, params in selected:
             thought_chain.append({
                 "type": "action", "tool": tool_name,
@@ -176,20 +214,32 @@ class FinancialAnalysisAgent:
                 "type": "observation", "tool": tool_name,
                 "output": json.dumps(result, ensure_ascii=False)[:500],
             })
-            sources.append({"tool": tool_name, "summary": json.dumps(result, ensure_ascii=False)[:300]})
+            sources.append({
+                "tool": tool_name,
+                "title": TOOL_LABELS.get(tool_name, tool_name),
+                "kind": "tool",
+                "summary": json.dumps(result, ensure_ascii=False)[:300],
+            })
 
         rag_bits = []
         if use_rag:
             try:
                 hits = await self._rag.retrieve(question, top_k=int(rag_params.get().get("top_k", 5)))
                 for h in hits:
-                    rag_bits.append(f"[{h.get('title')}] {h.get('content','')[:600]}")
+                    title = (h.get("title") or "").strip() or "知识库文档"
+                    rag_bits.append(f"[{title}] {h.get('content','')[:600]}")
                     sources.append({
-                        "tool": "rag", "title": h.get("title"),
-                        "source_url": h.get("source_url"), "score": h.get("score"),
+                        "tool": "rag",
+                        "kind": "document",
+                        "title": title,
+                        "doc_id": h.get("doc_id"),
+                        "source_url": h.get("source_url") or "",
+                        "score": h.get("score"),
                     })
             except Exception as e:
                 logger.warning("rag retrieve: %s", e)
+
+        sources = self._dedupe_sources(sources)
 
         context_blob = json.dumps(tool_results, ensure_ascii=False)[:12000]
         history_txt = "\n".join(

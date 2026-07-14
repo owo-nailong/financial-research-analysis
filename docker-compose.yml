@@ -1,0 +1,155 @@
+# 金融研报智能分析系统 — 一键启动
+# 用法: docker compose up -d --build
+# 访问: http://localhost:8080
+
+name: financial-research
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: fras-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-financial_research}
+      MYSQL_USER: ${MYSQL_USER:-fras}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fras123}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init_db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - fras-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: fras-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - fras-net
+
+  # 模型存储说明：
+  # - 默认使用 Docker 卷 ollama_data（与本机 Ollama 隔离，需在容器内再 pull 一次）
+  # - 若本机已下载过模型，在 .env 设置：
+  #     OLLAMA_MODELS_DIR=C:\Users\你的用户名\.ollama   (Windows)
+  #     OLLAMA_MODELS_DIR=/home/你的用户名/.ollama      (Linux)
+  #     OLLAMA_MODELS_DIR=/Users/你的用户名/.ollama     (macOS)
+  #   即可挂载本机模型目录，一般无需重新下载
+  # - 或者本机已在跑 Ollama 服务时，设置：
+  #     OLLAMA_BASE_URL=http://host.docker.internal:11434
+  #   并可不依赖本容器内的模型文件
+  ollama:
+    image: ollama/ollama:latest
+    container_name: fras-ollama
+    restart: unless-stopped
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-ollama_data}:/root/.ollama
+    # 有 NVIDIA GPU 时可取消下面注释以加速推理
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    networks:
+      - fras-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: fras-backend
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      USE_SQLITE: "false"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-fras}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fras123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-financial_research}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # 默认连 compose 内 ollama；也可改为 http://host.docker.internal:11434 复用本机 Ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      LLM_PROVIDER: ollama
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:latest}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embeddinggemma:latest}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      USER_USERNAME: ${USER_USERNAME:-user}
+      USER_PASSWORD: ${USER_PASSWORD:-user123}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8000
+      DEBUG: "false"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      NO_PROXY: "mysql,redis,ollama,backend,localhost,127.0.0.1"
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    networks:
+      - fras-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fras-frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - fras-net
+
+volumes:
+  mysql_data:
+  redis_data:
+  ollama_data:
+  app_data:
+
+networks:
+  fras-net:
+    driver: bridge
