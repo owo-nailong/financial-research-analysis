@@ -1,6 +1,7 @@
 """
 LangChain-style financial agent with tool routing + RAG.
-Falls back to direct tool orchestration when LangChain tool-calling is unavailable.
+Uses MCP tools in a ReAct-style loop (Thought -> Action -> Observation).
+LangChain packages are imported when available for stack alignment.
 """
 from __future__ import annotations
 
@@ -11,6 +12,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
+
+try:
+    import langchain  # noqa: F401
+    import langchain_core  # noqa: F401
+    LANGCHAIN_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_AVAILABLE = False
 
 from mcp_tools import mcp_handler, MCP_TOOL_DEFINITIONS
 from database import InvestmentQA, SessionLocal, KnowledgeDocument
@@ -87,6 +95,8 @@ class FinancialAnalysisAgent:
         self._rag = RAGRetriever()
         self._sessions: dict[str, SessionState] = {}
         self._tools = MCP_TOOL_DEFINITIONS
+        self.langchain_available = LANGCHAIN_AVAILABLE
+        logger.info("[Agent] langchain_available=%s tools=%s", LANGCHAIN_AVAILABLE, len(self._tools))
 
     def get_session(self, session_id: str) -> SessionState:
         if session_id not in self._sessions:
