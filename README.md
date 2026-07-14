@@ -7,7 +7,6 @@ Python / FastAPI + Flask + Vue.js + MySQL 8 + Redis + Ollama (RAG / Agent)
 - MySQL 8.x（`USE_SQLITE=false`）
 - Redis（Docker 示例容器名 `finagent-redis` 或本机 6379）
 - Ollama：`qwen2.5:latest`、`embeddinggemma:latest`
-- 下载代理（可选）：`HTTP_PROXY=http://127.0.0.1:7897`
 
 ## 启动
 
